@@ -3,7 +3,7 @@
 from collections import deque
 import math
 import random
-from typing import Deque, List, Tuple
+from typing import Deque, List, Optional, Tuple
 import pygame
 
 from facepong.config import PhysicsConfig
@@ -12,17 +12,25 @@ from facepong.config import PhysicsConfig
 class Paddle:
     """Represents a player or AI controlled paddle with smooth position clamping."""
 
-    def __init__(self, x: float, y: float, width: int, height: int, screen_height: int):
+    def __init__(self, x: float, y: float, width: int, height: int, screen_height: int = 720, min_y: int = 10, max_y: Optional[int] = None):
         self.x = float(x)
         self.y = float(y)  # Center Y coordinate
         self.width = width
         self.height = height
         self.screen_height = screen_height
+        self.min_y = min_y
+        self.max_y = max_y if max_y is not None else (screen_height - 10)
 
         self.target_y = float(y)
-        self.speed = 600.0  # Pixels per second for keyboard or AI tracking
+        self.speed = 650.0  # Pixels per second for keyboard or AI tracking
         self.rect = pygame.Rect(0, 0, width, height)
         self._update_rect()
+
+    def set_bounds(self, min_y: int, max_y: int) -> None:
+        """Updates paddle vertical motion bounds."""
+        self.min_y = min_y
+        self.max_y = max_y
+        self.clamp_target()
 
     def _update_rect(self) -> None:
         """Synchronizes Pygame bounding rectangle with center coordinates."""
@@ -33,8 +41,8 @@ class Paddle:
     def set_target_normalized_y(self, norm_y: float) -> None:
         """Maps a 0.0-1.0 normalized coordinate to valid screen paddle range."""
         half_h = self.height / 2.0
-        min_center = half_h + 10
-        max_center = self.screen_height - half_h - 10
+        min_center = self.min_y + half_h + 4
+        max_center = self.max_y - half_h - 4
         self.target_y = min_center + norm_y * (max_center - min_center)
 
     def move_keyboard(self, direction: float, dt: float) -> None:
@@ -44,34 +52,36 @@ class Paddle:
 
     def update(self, dt: float, smooth_factor: float = 24.0) -> None:
         """Smoothly interpolates paddle position towards target coordinate."""
-        # Exponential lerp for responsive and butter-smooth movement
         diff = self.target_y - self.y
         self.y += diff * min(1.0, smooth_factor * dt)
 
         # Enforce bounds
         half_h = self.height / 2.0
-        min_y = half_h + 10
-        max_y = self.screen_height - half_h - 10
-        self.y = max(min_y, min(max_y, self.y))
+        min_center = self.min_y + half_h + 4
+        max_center = self.max_y - half_h - 4
+        self.y = max(min_center, min(max_center, self.y))
         self._update_rect()
 
     def clamp_target(self) -> None:
         """Ensures target coordinate does not exceed boundaries."""
         half_h = self.height / 2.0
-        self.target_y = max(half_h + 10, min(self.screen_height - half_h - 10, self.target_y))
+        min_center = self.min_y + half_h + 4
+        max_center = self.max_y - half_h - 4
+        self.target_y = max(min_center, min(max_center, self.target_y))
 
 
 class Ball:
     """Ball entity featuring high precision trajectory, comet trail, and bounce physics."""
 
-    def __init__(self, screen_width: int, screen_height: int, config: PhysicsConfig):
+    def __init__(self, screen_width: int, screen_height: int, config: PhysicsConfig, arena_rect: Optional[pygame.Rect] = None):
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.config = config
-
         self.radius = config.ball_radius
-        self.x = screen_width / 2.0
-        self.y = screen_height / 2.0
+
+        self.arena_rect = arena_rect or pygame.Rect(0, 10, screen_width, screen_height - 20)
+        self.x = float(self.arena_rect.centerx)
+        self.y = float(self.arena_rect.centery)
         self.vx = 0.0
         self.vy = 0.0
         self.speed = config.ball_initial_speed
@@ -79,10 +89,14 @@ class Ball:
         self.trail: Deque[Tuple[float, float]] = deque(maxlen=10)
         self.trail_timer = 0.0
 
+    def set_arena(self, arena_rect: pygame.Rect) -> None:
+        """Updates active arena boundaries."""
+        self.arena_rect = arena_rect
+
     def serve(self, direction_to_player: bool = True) -> None:
-        """Resets the ball to screen center and launches with randomized angle."""
-        self.x = self.screen_width / 2.0
-        self.y = self.screen_height / 2.0
+        """Resets the ball to arena center and launches with randomized angle."""
+        self.x = float(self.arena_rect.centerx)
+        self.y = float(self.arena_rect.centery)
         self.speed = self.config.ball_initial_speed
         self.trail.clear()
 
@@ -112,12 +126,15 @@ class Ball:
 
         # Boundary bounce check
         wall_bounce = False
-        if self.y - self.radius <= 10:
-            self.y = 10 + self.radius
+        top_limit = self.arena_rect.top + self.radius + 2
+        bottom_limit = self.arena_rect.bottom - self.radius - 2
+
+        if self.y <= top_limit:
+            self.y = top_limit
             self.vy = abs(self.vy)
             wall_bounce = True
-        elif self.y + self.radius >= self.screen_height - 10:
-            self.y = self.screen_height - 10 - self.radius
+        elif self.y >= bottom_limit:
+            self.y = bottom_limit
             self.vy = -abs(self.vy)
             wall_bounce = True
 

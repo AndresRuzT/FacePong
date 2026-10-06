@@ -10,6 +10,24 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def open_video_capture(device_index: int) -> Optional[cv2.VideoCapture]:
+    """
+    Opens a VideoCapture device using V4L2 on Linux to avoid FFMPEG index limits,
+    falling back to default backends if needed.
+    """
+    import sys
+    backends = [cv2.CAP_V4L2, cv2.CAP_ANY] if sys.platform.startswith("linux") else [cv2.CAP_ANY]
+    for backend in backends:
+        try:
+            cap = cv2.VideoCapture(device_index, backend)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        except Exception:
+            pass
+    return None
+
+
 def find_preferred_camera_device(requested_index: Optional[int] = None) -> Tuple[int, str]:
     """
     Identifies and selects the optimal video capture device.
@@ -41,7 +59,6 @@ def find_preferred_camera_device(requested_index: Optional[int] = None) -> Tuple
                     with open(name_file, "r", errors="ignore") as f:
                         name = f.read().strip()
 
-                # Determine if bus is USB
                 device_link = ""
                 try:
                     device_link = os.path.realpath(os.path.join(dev_path, "device"))
@@ -54,10 +71,10 @@ def find_preferred_camera_device(requested_index: Optional[int] = None) -> Tuple
                 )
                 is_usb = "usb" in device_link.lower()
 
-                # Verify actual video frame capture capability (filters out metadata/IR subnodes)
-                cap = cv2.VideoCapture(idx)
+                # Verify actual video frame capture capability using V4L2
+                cap = open_video_capture(idx)
                 can_read = False
-                if cap.isOpened():
+                if cap is not None:
                     ret, frame = cap.read()
                     can_read = bool(ret and frame is not None)
                     cap.release()
@@ -83,8 +100,8 @@ def find_preferred_camera_device(requested_index: Optional[int] = None) -> Tuple
     # 2. Fallback probe across indices 0..4 if v4l discovery found nothing
     if not candidates:
         for idx in range(4):
-            cap = cv2.VideoCapture(idx)
-            if cap.isOpened():
+            cap = open_video_capture(idx)
+            if cap is not None:
                 ret, frame = cap.read()
                 cap.release()
                 if ret and frame is not None:
@@ -122,8 +139,26 @@ class ThreadedCamera:
         """Initializes the camera capture device and starts the worker thread."""
         try:
             logger.info("Initializing camera capture: %s (index %d)", self.device_description, self.device_index)
-            self._capture = cv2.VideoCapture(self.device_index)
-            if self._capture.isOpened():
+
+            # Attempt opening target device with retries in case hardware endpoint is settling
+            for attempt in range(3):
+                self._capture = open_video_capture(self.device_index)
+                if self._capture is not None:
+                    break
+                logger.debug("Camera open attempt %d failed, retrying in 0.2s...", attempt + 1)
+                time.sleep(0.2)
+
+            # If preferred external camera failed, attempt fallback to alternate camera
+            if self._capture is None:
+                alternate_idx = 0 if self.device_index != 0 else 2
+                logger.warning("Preferred camera %d failed to open. Attempting fallback to camera %d", 
+                               self.device_index, alternate_idx)
+                self._capture = open_video_capture(alternate_idx)
+                if self._capture is not None:
+                    self.device_index = alternate_idx
+                    self.device_description = f"Fallback Camera (index {alternate_idx})"
+
+            if self._capture is not None and self._capture.isOpened():
                 self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
                 self._capture.set(cv2.CAP_PROP_FPS, self.target_fps)
@@ -131,7 +166,7 @@ class ThreadedCamera:
                 logger.info("Camera %d (%s) opened successfully at %dx%d", 
                             self.device_index, self.device_description, self.target_width, self.target_height)
             else:
-                logger.warning("Camera index %d could not be opened. Using synthetic fallback.", self.device_index)
+                logger.warning("No camera could be opened. Using synthetic fallback.")
                 self._use_synthetic = True
                 self._is_opened = False
         except Exception as exc:

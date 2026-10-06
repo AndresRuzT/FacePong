@@ -11,6 +11,7 @@ class DisplayConfig:
     target_fps: int = 60
     title: str = "FacePong // AudacIA Cyber-Arena"
     fullscreen: bool = False
+    windowed_maximized: bool = True
 
 
 @dataclass(frozen=True)

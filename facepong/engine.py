@@ -27,16 +27,26 @@ class GameEngine:
 
         # Initialize Pygame display
         pygame.init()
-        display_flags = pygame.DOUBLEBUF
+        display_flags = pygame.DOUBLEBUF | pygame.RESIZABLE
         if config.display.fullscreen:
             display_flags |= pygame.FULLSCREEN
 
-        self.screen = pygame.display.set_mode(
-            (config.display.width, config.display.height),
-            display_flags,
-        )
+        display_w = config.display.width
+        display_h = config.display.height
+
+        # Fit desktop resolution in windowed mode
+        if not config.display.fullscreen and getattr(config.display, "windowed_maximized", True):
+            desktop_info = pygame.display.Info()
+            if desktop_info.current_w > 640 and desktop_info.current_h > 480:
+                display_w = desktop_info.current_w
+                display_h = max(600, desktop_info.current_h - 45)
+
+        self.screen = pygame.display.set_mode((display_w, display_h), display_flags)
         pygame.display.set_caption(config.display.title)
         self.clock = pygame.time.Clock()
+
+        # Calculate arena playfield geometry
+        self._calculate_arena_geometry(display_w, display_h)
 
         # Core Subsystems
         self.vision = VisionPipeline(config.camera)
@@ -47,36 +57,38 @@ class GameEngine:
         self.ai = AdaptiveAIController(
             config.ai,
             config.physics,
-            config.display.width,
-            config.display.height,
+            display_w,
+            display_h,
         )
         self.sound = SoundManager(config.audio)
-        self.renderer = NeonRenderer(self.screen, config)
+        self.renderer = NeonRenderer(self.screen, config, arena_rect=self.arena_rect)
         self.screens = ScreenManager(self.renderer, config)
         self.particles = ParticleSystem(max_particles=150)
 
-        # Game Entities
-        screen_w = config.display.width
-        screen_h = config.display.height
+        # Game Entities (Positioned strictly inside arena bounds)
         paddle_w = config.physics.paddle_width
         paddle_h = config.physics.paddle_height
         margin = config.physics.paddle_margin
 
         self.player_paddle = Paddle(
-            x=margin + paddle_w / 2.0,
-            y=screen_h / 2.0,
+            x=self.arena_rect.left + margin + paddle_w / 2.0,
+            y=self.arena_rect.centery,
             width=paddle_w,
             height=paddle_h,
-            screen_height=screen_h,
+            screen_height=display_h,
+            min_y=self.arena_rect.top,
+            max_y=self.arena_rect.bottom,
         )
         self.ai_paddle = Paddle(
-            x=screen_w - margin - paddle_w / 2.0,
-            y=screen_h / 2.0,
+            x=self.arena_rect.right - margin - paddle_w / 2.0,
+            y=self.arena_rect.centery,
             width=paddle_w,
             height=paddle_h,
-            screen_height=screen_h,
+            screen_height=display_h,
+            min_y=self.arena_rect.top,
+            max_y=self.arena_rect.bottom,
         )
-        self.ball = Ball(screen_w, screen_h, config.physics)
+        self.ball = Ball(display_w, display_h, config.physics, arena_rect=self.arena_rect)
 
         # Keyboard override tracker
         self._keyboard_active = False
@@ -85,6 +97,35 @@ class GameEngine:
         self._previous_state = ExhibitionState.ATTRACT
         self._last_calibration_second = -1
         self._calibration_progress = 0.0
+
+    def _calculate_arena_geometry(self, w: int, h: int) -> None:
+        """Computes rectangular playfield arena leaving top header for HUD/PIP."""
+        header_h = 118
+        margin_x = 24
+        margin_b = 18
+        self.arena_rect = pygame.Rect(
+            margin_x,
+            header_h,
+            max(200, w - 2 * margin_x),
+            max(200, h - header_h - margin_b),
+        )
+
+    def _on_window_resize(self, new_w: int, new_h: int) -> None:
+        """Adapts arena, entities, and UI when window size changes."""
+        w = max(640, new_w)
+        h = max(480, new_h)
+        self.screen = pygame.display.set_mode((w, h), pygame.DOUBLEBUF | pygame.RESIZABLE)
+        self._calculate_arena_geometry(w, h)
+        self.renderer.update_geometry(self.screen, self.arena_rect)
+        self.screens.update_geometry(self.renderer)
+
+        margin = self.config.physics.paddle_margin
+        paddle_w = self.config.physics.paddle_width
+        self.player_paddle.x = self.arena_rect.left + margin + paddle_w / 2.0
+        self.player_paddle.set_bounds(self.arena_rect.top, self.arena_rect.bottom)
+        self.ai_paddle.x = self.arena_rect.right - margin - paddle_w / 2.0
+        self.ai_paddle.set_bounds(self.arena_rect.top, self.arena_rect.bottom)
+        self.ball.set_arena(self.arena_rect)
 
     def start(self) -> None:
         """Starts background threads and executes the main loop."""
@@ -97,7 +138,7 @@ class GameEngine:
         try:
             while self._is_running:
                 current_time = time.perf_counter()
-                dt = min(0.05, current_time - last_time)  # Clamp dt to prevent physics tunneling
+                dt = min(0.05, current_time - last_time)
                 last_time = current_time
 
                 self._handle_events(dt)
@@ -117,7 +158,10 @@ class GameEngine:
                 self._is_running = False
                 return
 
-            if event.type == pygame.KEYDOWN:
+            if event.type == pygame.VIDEORESIZE:
+                self._on_window_resize(event.w, event.h)
+
+            elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self._is_running = False
                     return
@@ -158,7 +202,7 @@ class GameEngine:
         # Re-fetch state in case watchdog triggered a transition
         state = self.state_mgr.current_state
 
-        # Detect transition into CALIBRATING (from watchdog, keyboard, or auto)
+        # Detect transition into CALIBRATING
         if state == ExhibitionState.CALIBRATING and self._previous_state != ExhibitionState.CALIBRATING:
             self.vision.begin_calibration()
             self._last_calibration_second = -1
@@ -186,20 +230,23 @@ class GameEngine:
             self._update_point_scored_mode(dt)
 
         elif state == ExhibitionState.GAME_OVER:
-            # Subtle slow drift of paddles during game over
             self.player_paddle.update(dt)
             self.ai_paddle.update(dt)
 
     def _update_attract_mode(self, dt: float) -> None:
         """Simulates autonomous gameplay demo during idle kiosk state."""
-        # AI vs AI mini demo for visual attraction
         self.ball.update(dt)
 
-        # Bounce off screen left and right in demo mode
-        if self.ball.x <= self.config.physics.ball_radius + 15:
+        # Bounce off arena boundaries in demo mode
+        left_bound = self.arena_rect.left + self.config.physics.ball_radius + 4
+        right_bound = self.arena_rect.right - self.config.physics.ball_radius - 4
+
+        if self.ball.x <= left_bound:
+            self.ball.x = left_bound
             self.ball.vx = abs(self.ball.vx)
             self.particles.emit(self.ball.x, self.ball.y, self.config.colors.player_primary, count=8)
-        elif self.ball.x >= self.config.display.width - self.config.physics.ball_radius - 15:
+        elif self.ball.x >= right_bound:
+            self.ball.x = right_bound
             self.ball.vx = -abs(self.ball.vx)
             self.particles.emit(self.ball.x, self.ball.y, self.config.colors.ai_primary, count=8)
 
@@ -262,10 +309,10 @@ class GameEngine:
             self.state_mgr.increment_rally()
             self.particles.emit(self.ball.x, self.ball.y, self.config.colors.ai_primary, count=18)
 
-        # Goal Detection
-        if self.ball.x < 0:
+        # Goal Detection relative to arena frame
+        if self.ball.x < self.arena_rect.left:
             # AI Scored
-            self.particles.emit(10, self.ball.y, self.config.colors.ai_primary, count=35, speed_range=(150.0, 450.0))
+            self.particles.emit(self.arena_rect.left + 5, self.ball.y, self.config.colors.ai_primary, count=35, speed_range=(150.0, 450.0))
             is_game_over = self.state_mgr.record_goal("AI")
             self.sound.play("opponent_goal")
             if is_game_over:
@@ -274,10 +321,10 @@ class GameEngine:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
                 self.state_mgr.pause_timer = self.config.physics.goal_pause_sec
 
-        elif self.ball.x > self.config.display.width:
+        elif self.ball.x > self.arena_rect.right:
             # Player Scored
             self.particles.emit(
-                self.config.display.width - 10,
+                self.arena_rect.right - 5,
                 self.ball.y,
                 self.config.colors.player_primary,
                 count=35,
@@ -298,22 +345,40 @@ class GameEngine:
 
         self.state_mgr.pause_timer -= dt
         if self.state_mgr.pause_timer <= 0:
-            # Serve towards whichever side conceded
-            serve_to_player = (self.ball.x < self.config.display.width / 2.0)
+            serve_to_player = (self.ball.x < self.arena_rect.centerx)
             self.ball.serve(direction_to_player=serve_to_player)
             self.sound.play("beep")
             self.state_mgr.change_state(ExhibitionState.PLAYING)
 
     def _render(self) -> None:
-        """Renders the appropriate scene depending on exhibition state."""
-        self.renderer.render_background()
-        self.renderer.render_field()
+        """Renders scene with outer bezel HUD and unoccluded arena."""
+        now = time.perf_counter()
+        dt = 1.0 / max(1, self.config.display.target_fps)
 
-        state = self.state_mgr.current_state
+        # 1. Background with animated perspective synthwave grid inside arena
+        self.renderer.render_background(time_sec=now, dt=dt)
+
+        # 2. Outer glowing arena bezel & field dividers
+        self.renderer.render_arena_frame(time_sec=now)
+
+        # 3. Exterior Top Header Bar (HUD & Camera PIP completely outside the arena)
         tracking_state = self.vision.get_state()
+        state = self.state_mgr.current_state
 
+        match_dur = self.state_mgr.match_duration_sec or (
+            now - self.state_mgr.match_start_time if self.state_mgr.match_start_time > 0 else 0.0
+        )
+        self.renderer.render_exterior_header(
+            tracking_state=tracking_state,
+            player_score=self.state_mgr.player_score,
+            ai_score=self.state_mgr.ai_score,
+            ai_difficulty=self.ai.difficulty_level,
+            match_duration_sec=match_dur,
+            rally_count=self.state_mgr.rally_count,
+        )
+
+        # 4. Arena Entities
         if state == ExhibitionState.ATTRACT:
-            # Render demo paddles and ball
             self.renderer.render_paddle(self.player_paddle, self.config.colors.player_primary, self.config.colors.player_glow)
             self.renderer.render_paddle(self.ai_paddle, self.config.colors.ai_primary, self.config.colors.ai_glow)
             self.renderer.render_ball(self.ball)
@@ -328,20 +393,13 @@ class GameEngine:
             self.renderer.render_paddle(self.ai_paddle, self.config.colors.ai_primary, self.config.colors.ai_glow)
             self.renderer.render_ball(self.ball)
             self.renderer.render_particles(self.particles)
-            self.renderer.render_scores(self.state_mgr.player_score, self.state_mgr.ai_score)
 
-            # Camera PIP & AI Difficulty meter
-            self.renderer.render_camera_pip(tracking_state, position=(25, 25))
-            self.renderer.render_ai_difficulty_meter(self.ai.difficulty_level, position=(25, self.config.display.height - 40))
-
-            # Inactivity alert if player temporarily vanishes
             if not tracking_state.face_detected and tracking_state.last_detected_time > 0:
                 elapsed = time.perf_counter() - tracking_state.last_detected_time
                 remaining = self.config.camera.inactivity_timeout_sec - elapsed
                 if remaining < 3.5:
                     self.screens.draw_inactivity_warning(remaining)
 
-            # Debug Overlay
             if self.config.debug_mode:
                 self._render_debug_overlay()
 
@@ -359,11 +417,12 @@ class GameEngine:
             f"AI Speed: {self.ai.current_speed:.0f} px/s | Diff: {self.ai.difficulty_level:.2f}",
             f"Ball Speed: {self.ball.speed:.0f} px/s",
             f"Rally Count: {self.state_mgr.rally_count}",
+            f"Camera: {self.vision.camera.device_description}",
         ]
-        y_offset = 200
+        y_offset = self.arena_rect.top + 20
         for line in db_lines:
             s = self.renderer.font_hud.render(line, True, self.config.colors.amber_accent)
-            self.screen.blit(s, (25, y_offset))
+            self.screen.blit(s, (self.arena_rect.left + 20, y_offset))
             y_offset += 20
 
     def _shutdown(self) -> None:

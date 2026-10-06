@@ -50,19 +50,20 @@ class AdaptiveAIController:
         Calculates geometric trajectory intersection at the AI paddle plane,
         simulating elastic bounces on top and bottom boundaries.
         """
+        arena = getattr(ball, "arena_rect", None)
+        top_boundary = (arena.top + ball.radius + 2) if arena else (10.0 + ball.radius)
+        bottom_boundary = (arena.bottom - ball.radius - 2) if arena else (self.screen_height - 10.0 - ball.radius)
+        center_y = arena.centery if arena else (self.screen_height / 2.0)
+
         if ball.vx <= 0:
             # Ball moving away: return to center position
-            return self.screen_height / 2.0
+            return center_y
 
         time_to_reach = (ai_paddle_x - ball.x) / max(1.0, ball.vx)
         if time_to_reach <= 0:
             return ball.y
 
-        # Bound range for bouncing
-        top_boundary = 10.0 + ball.radius
-        bottom_boundary = self.screen_height - 10.0 - ball.radius
         field_height = bottom_boundary - top_boundary
-
         if field_height <= 0:
             return ball.y
 
