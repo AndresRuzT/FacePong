@@ -34,6 +34,7 @@ class Paddle:
         self.target_y = float(y)
         self.speed = 650.0  # Pixels per second for keyboard or AI tracking
         self.max_speed = max_speed  # Pixels per second cap to eliminate teleportation jumps
+        self.current_velocity = 0.0  # SmoothDamp continuous velocity state
         self.rect = pygame.Rect(0, 0, width, height)
         self._update_rect()
 
@@ -60,6 +61,7 @@ class Paddle:
         """Immediately snaps paddle to vertical center coordinate."""
         self.target_y = float(center_y)
         self.y = float(center_y)
+        self.current_velocity = 0.0
         self.clamp_target()
         self._update_rect()
 
@@ -68,21 +70,43 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_factor: float = 32.0) -> None:
+    def update(self, dt: float, smooth_time: float = 0.075) -> None:
         """
-        Smoothly interpolates paddle position towards target coordinate,
-        clamping step velocity to max_speed to eliminate teleportation jumps.
+        Critically damped spring interpolation (SmoothDamp) towards target coordinate.
+        Bridges 30 FPS camera updates to silky 60 FPS display refresh with zero jumps.
         """
-        diff = self.target_y - self.y
-        desired_velocity = diff * smooth_factor
-        clamped_velocity = max(-self.max_speed, min(self.max_speed, desired_velocity))
-        self.y += clamped_velocity * dt
+        st = max(0.0001, smooth_time)
+        omega = 2.0 / st
+        x = omega * dt
+        exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
+
+        change = self.y - self.target_y
+        max_change = self.max_speed * st
+        change = max(-max_change, min(max_change, change))
+        temp_target = self.y - change
+
+        temp = (self.current_velocity + omega * change) * dt
+        self.current_velocity = (self.current_velocity - omega * temp) * exp
+        new_pos = temp_target + (change + temp) * exp
+
+        # Prevent overshooting target
+        if (self.target_y - self.y > 0.0) == (new_pos > self.target_y):
+            new_pos = self.target_y
+            self.current_velocity = 0.0
+
+        self.y = new_pos
 
         # Enforce bounds
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
-        self.y = max(min_center, min(max_center, self.y))
+        if self.y <= min_center:
+            self.y = min_center
+            self.current_velocity = max(0.0, self.current_velocity)
+        elif self.y >= max_center:
+            self.y = max_center
+            self.current_velocity = min(0.0, self.current_velocity)
+
         self._update_rect()
 
     def clamp_target(self) -> None:

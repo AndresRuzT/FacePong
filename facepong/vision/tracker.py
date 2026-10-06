@@ -235,61 +235,26 @@ class FaceMeshTracker:
                 self._recenter_needed = False
                 logger.info("Auto-recalibrated neutral baseline to %.2f on new camera frame", raw_y)
 
-            # Map raw_y into [0.0, 1.0]
+            # Map raw_y into normalized [0.0, 1.0]
             span = max(0.01, (self._max_y_bound - self._min_y_bound))
             mapped_y = (raw_y - self._min_y_bound) / span
             mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
 
-            # Auto-drift adaptation: if player shifted posture and stays pinned at boundary for 15 frames (~0.5s)
-            if mapped_y <= 0.01:
-                self._clamped_at_min_count += 1
-                self._clamped_at_max_count = 0
-                if self._clamped_at_min_count >= 15:
-                    current_center = (self._min_y_bound + self._max_y_bound) / 2.0
-                    self.calibrate_baseline(current_center - 0.02)
-                    self._clamped_at_min_count = 0
-            elif mapped_y >= 0.99:
-                self._clamped_at_max_count += 1
-                self._clamped_at_min_count = 0
-                if self._clamped_at_max_count >= 15:
-                    current_center = (self._min_y_bound + self._max_y_bound) / 2.0
-                    self.calibrate_baseline(current_center + 0.02)
-                    self._clamped_at_max_count = 0
-            else:
-                self._clamped_at_min_count = 0
-                self._clamped_at_max_count = 0
-
-            # Adaptive EMA: steady stability for subtle posture, rapid responsiveness on sudden motion
-            diff_magnitude = abs(mapped_y - self._smoothed_y)
-            base_alpha = getattr(self.config, "ema_alpha", 0.25)
-            fast_alpha = getattr(self.config, "fast_alpha", 0.65)
-            velocity_ratio = min(1.0, diff_magnitude / 0.12)
-            adaptive_alpha = base_alpha + (fast_alpha - base_alpha) * (velocity_ratio ** 1.3)
-
-            # Apply Exponential Moving Average (EMA) with adaptive alpha
+            # Stable Low-Pass EMA filtering for silky smooth, monotonic tracking
+            alpha = getattr(self.config, "ema_alpha", 0.26)
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
             else:
-                self._smoothed_y = (adaptive_alpha * mapped_y) + ((1.0 - adaptive_alpha) * self._smoothed_y)
+                self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
 
         else:
-            # Momentum-assisted grace period (0.35s): prevents paddle stutter during blinks or rapid flick
+            # Grace period (0.35s): maintains smooth tracking during momentary blinks
             if (now - self._last_valid_detection_time) < 0.35 and not self._is_first_sample:
                 effective_detected = True
-                dt_gap = now - self._last_valid_detection_time
-                decay = max(0.0, 1.0 - (dt_gap / 0.35))
-                # Extrapolate along recent velocity instead of freezing at the old start position
-                extrapolated_y = self._last_valid_raw_y + self._velocity_y * dt_gap * decay
-                raw_y = float(np.clip(extrapolated_y, 0.05, 0.95))
-
-                span = max(0.01, (self._max_y_bound - self._min_y_bound))
-                mapped_y = float(np.clip((raw_y - self._min_y_bound) / span, 0.0, 1.0))
-                self._smoothed_y = 0.25 * mapped_y + 0.75 * self._smoothed_y
-
                 cv2.putText(
                     hud_frame,
-                    "TRACKING: MOMENTUM",
+                    "TRACKING: HOLD",
                     (8, preview_h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.35,

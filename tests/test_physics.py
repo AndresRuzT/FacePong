@@ -33,6 +33,17 @@ class TestPhysicsAndEntities(unittest.TestCase):
         self.assertAlmostEqual(paddle.target_y, 360.0)
         self.assertEqual(paddle.rect.centery, 360)
 
+    def test_paddle_smooth_damp_interpolation(self):
+        paddle = Paddle(x=50, y=100, width=16, height=100, screen_height=self.screen_h)
+        paddle.target_y = 500.0
+        # Run 10 frames of 60 FPS
+        for _ in range(10):
+            paddle.update(0.016)
+        # Position should smoothly advance towards 500 without overshooting
+        self.assertGreater(paddle.y, 100.0)
+        self.assertLessEqual(paddle.y, 500.0)
+        self.assertGreater(paddle.current_velocity, 0.0)
+
     def test_ball_wall_bounce(self):
         ball = Ball(self.screen_w, self.screen_h, self.config)
         ball.x = 640

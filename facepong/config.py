@@ -23,18 +23,17 @@ class CameraConfig:
     preview_width: int = 192
     preview_height: int = 144
     flip_horizontal: bool = True
-    # EMA smoothing alpha: base for steady posture, dynamically scaled on fast motion
-    ema_alpha: float = 0.25
-    fast_alpha: float = 0.65
+    # EMA smoothing alpha: smooth low-pass filtering for zero-jitter, continuous tracking
+    ema_alpha: float = 0.26
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
-    head_sensitivity: float = 2.4
-    # Calibration range spread around neutral head Y (smaller = higher sensitivity)
-    default_range_spread: float = 0.14
+    head_sensitivity: float = 2.0
+    # Calibration range spread around neutral head Y
+    default_range_spread: float = 0.18
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head range normalization defaults (fraction of frame height)
-    default_min_y: float = 0.43
-    default_max_y: float = 0.57
+    default_min_y: float = 0.41
+    default_max_y: float = 0.59
     # Calibration countdown in seconds
     calibration_duration_sec: float = 3.0
 

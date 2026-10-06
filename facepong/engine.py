@@ -107,8 +107,8 @@ class GameEngine:
         margin_x = 24
         margin_b = 18
         available_w = max(300, w - 2 * margin_x)
-        # Shorten horizontal distance by 15% for faster, more dynamic rallies
-        arena_w = int(available_w * 0.85)
+        # Shorten horizontal distance by an additional 15% (30% total) for compact, intense rallies
+        arena_w = int(available_w * 0.72)
         arena_left = (w - arena_w) // 2
         self.arena_rect = pygame.Rect(
             arena_left,
