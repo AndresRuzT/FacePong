@@ -260,9 +260,9 @@ class GameEngine:
 
         # Paddles track ball center loosely
         self.player_paddle.target_y = self.ball.y
-        self.player_paddle.update(dt, smooth_factor=8.0)
+        self.player_paddle.update(dt, smooth_time=0.12)
         self.ai_paddle.target_y = self.ball.y
-        self.ai_paddle.update(dt, smooth_factor=8.0)
+        self.ai_paddle.update(dt, smooth_time=0.12)
 
     def _update_calibration_mode(self, dt: float, tracking_state: TrackingState) -> None:
         """Executes calibration countdown before match start."""
@@ -362,8 +362,8 @@ class GameEngine:
         center_y = float(self.arena_rect.centery)
         self.player_paddle.target_y = center_y
         self.ai_paddle.target_y = center_y
-        self.player_paddle.update(dt, smooth_factor=16.0)
-        self.ai_paddle.update(dt, smooth_factor=16.0)
+        self.player_paddle.update(dt, smooth_time=0.08)
+        self.ai_paddle.update(dt, smooth_time=0.08)
 
         self.state_mgr.pause_timer -= dt
         if self.state_mgr.pause_timer <= 0:

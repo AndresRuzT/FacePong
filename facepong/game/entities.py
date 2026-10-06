@@ -70,11 +70,14 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_time: float = 0.075) -> None:
+    def update(self, dt: float, smooth_time: float = 0.075, smooth_factor: Optional[float] = None) -> None:
         """
         Critically damped spring interpolation (SmoothDamp) towards target coordinate.
         Bridges 30 FPS camera updates to silky 60 FPS display refresh with zero jumps.
         """
+        if smooth_factor is not None:
+            smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
+
         st = max(0.0001, smooth_time)
         omega = 2.0 / st
         x = omega * dt
