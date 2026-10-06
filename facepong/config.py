@@ -24,16 +24,16 @@ class CameraConfig:
     preview_height: int = 144
     flip_horizontal: bool = True
     # EMA smoothing alpha: smooth low-pass filtering for zero-jitter, continuous tracking
-    ema_alpha: float = 0.26
+    ema_alpha: float = 0.32
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
-    head_sensitivity: float = 2.0
+    head_sensitivity: float = 3.6
     # Calibration range spread around neutral head Y
-    default_range_spread: float = 0.18
+    default_range_spread: float = 0.14
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head range normalization defaults (fraction of frame height)
-    default_min_y: float = 0.41
-    default_max_y: float = 0.59
+    default_min_y: float = 0.46
+    default_max_y: float = 0.54
     # Calibration countdown in seconds
     calibration_duration_sec: float = 3.0
 
@@ -44,7 +44,7 @@ class PhysicsConfig:
     paddle_height: int = 110
     paddle_margin: int = 35
     paddle_speed_keyboard: float = 650.0  # px/sec
-    paddle_max_speed: float = 1250.0       # px/sec max speed to eliminate abrupt jumps
+    paddle_max_speed: float = 2800.0       # px/sec fast, responsive arcade speed
     ball_radius: int = 8
     ball_initial_speed: float = 520.0     # px/sec
     ball_max_speed: float = 1100.0        # px/sec

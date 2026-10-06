@@ -21,7 +21,7 @@ class Paddle:
         screen_height: int = 720,
         min_y: int = 10,
         max_y: Optional[int] = None,
-        max_speed: float = 1250.0,
+        max_speed: float = 2800.0,
     ):
         self.x = float(x)
         self.y = float(y)  # Center Y coordinate
@@ -33,7 +33,7 @@ class Paddle:
 
         self.target_y = float(y)
         self.speed = 650.0  # Pixels per second for keyboard or AI tracking
-        self.max_speed = max_speed  # Pixels per second cap to eliminate teleportation jumps
+        self.max_speed = max_speed  # Pixels per second cap
         self.current_velocity = 0.0  # SmoothDamp continuous velocity state
         self.rect = pygame.Rect(0, 0, width, height)
         self._update_rect()
@@ -70,7 +70,7 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_time: float = 0.075, smooth_factor: Optional[float] = None) -> None:
+    def update(self, dt: float, smooth_time: float = 0.045, smooth_factor: Optional[float] = None) -> None:
         """
         Critically damped spring interpolation (SmoothDamp) towards target coordinate.
         Bridges 30 FPS camera updates to silky 60 FPS display refresh with zero jumps.
