@@ -70,6 +70,7 @@ class GameEngine:
         paddle_h = config.physics.paddle_height
         margin = config.physics.paddle_margin
 
+        max_speed = getattr(config.physics, "paddle_max_speed", 1250.0)
         self.player_paddle = Paddle(
             x=self.arena_rect.left + margin + paddle_w / 2.0,
             y=self.arena_rect.centery,
@@ -78,6 +79,7 @@ class GameEngine:
             screen_height=display_h,
             min_y=self.arena_rect.top,
             max_y=self.arena_rect.bottom,
+            max_speed=max_speed,
         )
         self.ai_paddle = Paddle(
             x=self.arena_rect.right - margin - paddle_w / 2.0,
@@ -87,6 +89,7 @@ class GameEngine:
             screen_height=display_h,
             min_y=self.arena_rect.top,
             max_y=self.arena_rect.bottom,
+            max_speed=max_speed,
         )
         self.ball = Ball(display_w, display_h, config.physics, arena_rect=self.arena_rect)
 

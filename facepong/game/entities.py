@@ -12,7 +12,17 @@ from facepong.config import PhysicsConfig
 class Paddle:
     """Represents a player or AI controlled paddle with smooth position clamping."""
 
-    def __init__(self, x: float, y: float, width: int, height: int, screen_height: int = 720, min_y: int = 10, max_y: Optional[int] = None):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        width: int,
+        height: int,
+        screen_height: int = 720,
+        min_y: int = 10,
+        max_y: Optional[int] = None,
+        max_speed: float = 1250.0,
+    ):
         self.x = float(x)
         self.y = float(y)  # Center Y coordinate
         self.width = width
@@ -23,6 +33,7 @@ class Paddle:
 
         self.target_y = float(y)
         self.speed = 650.0  # Pixels per second for keyboard or AI tracking
+        self.max_speed = max_speed  # Pixels per second cap to eliminate teleportation jumps
         self.rect = pygame.Rect(0, 0, width, height)
         self._update_rect()
 
@@ -57,10 +68,15 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_factor: float = 38.0) -> None:
-        """Smoothly interpolates paddle position towards target coordinate."""
+    def update(self, dt: float, smooth_factor: float = 32.0) -> None:
+        """
+        Smoothly interpolates paddle position towards target coordinate,
+        clamping step velocity to max_speed to eliminate teleportation jumps.
+        """
         diff = self.target_y - self.y
-        self.y += diff * min(1.0, smooth_factor * dt)
+        desired_velocity = diff * smooth_factor
+        clamped_velocity = max(-self.max_speed, min(self.max_speed, desired_velocity))
+        self.y += clamped_velocity * dt
 
         # Enforce bounds
         half_h = self.height / 2.0

@@ -69,6 +69,8 @@ class FaceMeshTracker:
         self._clamped_at_max_count: int = 0
         self._last_valid_raw_y: float = 0.5
         self._last_valid_detection_time: float = 0.0
+        self._velocity_y: float = 0.0
+        self._last_raw_y_sample_time: float = 0.0
 
         # Detectors
         self._face_mesh = None
@@ -76,27 +78,31 @@ class FaceMeshTracker:
         self._init_detector()
 
     def _init_detector(self) -> None:
-        """Initializes MediaPipe Face Mesh or falls back to OpenCV Haar Cascade."""
+        """Initializes MediaPipe Face Mesh AND OpenCV Haar Cascade as complementary detectors."""
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                # Use 0.45 detection confidence for superior distance tracking
+                # Lower tracking confidence threshold prevents landmark drops during fast head jerks
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                     max_num_faces=1,
                     refine_landmarks=False,  # Higher FPS on Raspberry Pi
-                    min_detection_confidence=0.45,
-                    min_tracking_confidence=0.45,
+                    min_detection_confidence=0.35,
+                    min_tracking_confidence=0.30,
                 )
-                logger.info("MediaPipe Face Mesh tracker initialized (confidence 0.45)")
-                return
+                logger.info("MediaPipe Face Mesh tracker initialized (fast-motion resilient)")
         except Exception as exc:
-            logger.warning("MediaPipe initialization failed (%s). Falling back to OpenCV Cascade.", exc)
+            logger.warning("MediaPipe initialization failed (%s).", exc)
 
+        # Initialize OpenCV Cascade as active motion-blur backup if XML model is available on system
         try:
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            self._cascade = cv2.CascadeClassifier(cascade_path)
-            logger.info("OpenCV Haar Cascade face tracker initialized as fallback")
+            cascade_dir = getattr(cv2.data, "haarcascades", "")
+            cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
+            if os.path.exists(cascade_path):
+                cascade = cv2.CascadeClassifier(cascade_path)
+                if not cascade.empty():
+                    self._cascade = cascade
+                    logger.info("OpenCV Haar Cascade initialized as motion-blur backup detector")
         except Exception as exc:
-            logger.error("Failed to initialize OpenCV Cascade fallback: %s", exc)
+            logger.debug("OpenCV Cascade backup not available: %s", exc)
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
@@ -180,7 +186,8 @@ class FaceMeshTracker:
                     cv2.LINE_AA,
                 )
 
-        elif self._cascade is not None:
+        # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur during sudden head flick)
+        if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=3, minSize=(30, 30))
             if len(faces) > 0:
@@ -210,6 +217,12 @@ class FaceMeshTracker:
                 )
 
         if raw_face_detected:
+            # Kinematic velocity estimation
+            if self._last_raw_y_sample_time > 0:
+                dt_sample = max(0.001, now - self._last_raw_y_sample_time)
+                instant_vel = (raw_y - self._last_valid_raw_y) / dt_sample
+                self._velocity_y = 0.5 * self._velocity_y + 0.5 * instant_vel
+            self._last_raw_y_sample_time = now
             self._last_valid_raw_y = raw_y
             self._last_valid_detection_time = now
             effective_detected = True
@@ -246,21 +259,37 @@ class FaceMeshTracker:
                 self._clamped_at_min_count = 0
                 self._clamped_at_max_count = 0
 
-            # Exponential Moving Average (EMA)
+            # Adaptive EMA: steady stability for subtle posture, rapid responsiveness on sudden motion
+            diff_magnitude = abs(mapped_y - self._smoothed_y)
+            base_alpha = getattr(self.config, "ema_alpha", 0.25)
+            fast_alpha = getattr(self.config, "fast_alpha", 0.65)
+            velocity_ratio = min(1.0, diff_magnitude / 0.12)
+            adaptive_alpha = base_alpha + (fast_alpha - base_alpha) * (velocity_ratio ** 1.3)
+
+            # Apply Exponential Moving Average (EMA) with adaptive alpha
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
             else:
-                alpha = self.config.ema_alpha
-                self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
+                self._smoothed_y = (adaptive_alpha * mapped_y) + ((1.0 - adaptive_alpha) * self._smoothed_y)
 
         else:
-            # Grace period (0.35s): prevents paddle stutter during blinks or quick head tilts at distance
+            # Momentum-assisted grace period (0.35s): prevents paddle stutter during blinks or rapid flick
             if (now - self._last_valid_detection_time) < 0.35 and not self._is_first_sample:
                 effective_detected = True
+                dt_gap = now - self._last_valid_detection_time
+                decay = max(0.0, 1.0 - (dt_gap / 0.35))
+                # Extrapolate along recent velocity instead of freezing at the old start position
+                extrapolated_y = self._last_valid_raw_y + self._velocity_y * dt_gap * decay
+                raw_y = float(np.clip(extrapolated_y, 0.05, 0.95))
+
+                span = max(0.01, (self._max_y_bound - self._min_y_bound))
+                mapped_y = float(np.clip((raw_y - self._min_y_bound) / span, 0.0, 1.0))
+                self._smoothed_y = 0.25 * mapped_y + 0.75 * self._smoothed_y
+
                 cv2.putText(
                     hud_frame,
-                    "TRACKING: HOLD",
+                    "TRACKING: MOMENTUM",
                     (8, preview_h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.35,
@@ -270,6 +299,7 @@ class FaceMeshTracker:
                 )
             else:
                 effective_detected = False
+                self._velocity_y = 0.0
                 cv2.putText(
                     hud_frame,
                     "NO FACE DETECTED",
