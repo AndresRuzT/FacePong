@@ -67,6 +67,33 @@ class FaceMeshTracker:
         self._max_y_bound: float = config.default_max_y
         self._calibration_samples: List[float] = []
 
+        # MediaPipe initialization with OpenCV Cascade fallback
+        self._face_mesh = None
+        self._cascade = None
+        self._init_detector()
+
+    def _init_detector(self) -> None:
+        """Initializes MediaPipe Face Mesh or falls back to OpenCV Haar Cascade."""
+        try:
+            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                    max_num_faces=1,
+                    refine_landmarks=False,  # Set to False for higher FPS on Raspberry Pi
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+                logger.info("MediaPipe Face Mesh tracker initialized")
+                return
+        except Exception as exc:
+            logger.warning("MediaPipe initialization failed (%s). Falling back to OpenCV Cascade.", exc)
+
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self._cascade = cv2.CascadeClassifier(cascade_path)
+            logger.info("OpenCV Haar Cascade face tracker initialized as fallback")
+        except Exception as exc:
+            logger.error("Failed to initialize OpenCV Cascade fallback: %s", exc)
+
     def calibrate_baseline(self, neutral_y: float, range_spread: float = 0.22) -> None:
         """Sets comfortable dynamic range around player's neutral head position."""
         self._min_y_bound = max(0.05, neutral_y - range_spread)
@@ -86,8 +113,6 @@ class FaceMeshTracker:
 
         h, w, _ = frame.shape
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self._face_mesh.process(rgb_frame)
-
         face_detected = False
         raw_y = 0.5
 
@@ -101,61 +126,105 @@ class FaceMeshTracker:
         scale_x = preview_w / float(w)
         scale_y = preview_h / float(h)
 
-        if results.multi_face_landmarks:
-            face_detected = True
-            landmarks = results.multi_face_landmarks[0].landmark
+        if self._face_mesh is not None:
+            results = self._face_mesh.process(rgb_frame)
+            if results.multi_face_landmarks:
+                face_detected = True
+                landmarks = results.multi_face_landmarks[0].landmark
 
-            # Extract nose tip
-            nose_point = landmarks[NOSE_TIP_IDX]
-            raw_y = float(nose_point.y)
+                # Extract nose tip
+                nose_point = landmarks[NOSE_TIP_IDX]
+                raw_y = float(nose_point.y)
 
-            # Map raw_y according to calibrated bounds into [0.0, 1.0]
-            mapped_y = (raw_y - self._min_y_bound) / max(0.01, (self._max_y_bound - self._min_y_bound))
-            mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
+                # Map raw_y according to calibrated bounds into [0.0, 1.0]
+                mapped_y = (raw_y - self._min_y_bound) / max(0.01, (self._max_y_bound - self._min_y_bound))
+                mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
 
-            # Apply Exponential Moving Average (EMA)
-            if self._is_first_sample:
-                self._smoothed_y = mapped_y
-                self._is_first_sample = False
-            else:
-                alpha = self.config.ema_alpha
-                self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
+                # Apply Exponential Moving Average (EMA)
+                if self._is_first_sample:
+                    self._smoothed_y = mapped_y
+                    self._is_first_sample = False
+                else:
+                    alpha = self.config.ema_alpha
+                    self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
 
-            # Render futuristic landmarks onto HUD preview
-            nose_px = int(nose_point.x * preview_w)
-            nose_py = int(nose_point.y * preview_h)
+                # Render futuristic landmarks onto HUD preview
+                nose_px = int(nose_point.x * preview_w)
+                nose_py = int(nose_point.y * preview_h)
 
-            # Draw outer contour points
-            for idx in CONTOUR_KEYPOINTS:
-                pt = landmarks[idx]
-                px = int(pt.x * preview_w)
-                py = int(pt.y * preview_h)
-                cv2.circle(hud_frame, (px, py), 1, (0, 180, 255), -1)
+                # Draw outer contour points
+                for idx in CONTOUR_KEYPOINTS:
+                    pt = landmarks[idx]
+                    px = int(pt.x * preview_w)
+                    py = int(pt.y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 1, (0, 180, 255), -1)
 
-            # Draw eyes and chin markers
-            for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
-                pt = landmarks[idx]
-                px = int(pt.x * preview_w)
-                py = int(pt.y * preview_h)
-                cv2.circle(hud_frame, (px, py), 2, (255, 0, 180), -1)
+                # Draw eyes and chin markers
+                for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
+                    pt = landmarks[idx]
+                    px = int(pt.x * preview_w)
+                    py = int(pt.y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 2, (255, 0, 180), -1)
 
-            # Draw animated cyber reticle on nose tip
-            cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
-            cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
-            cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
+                # Draw animated cyber reticle on nose tip
+                cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
+                cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
+                cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
 
-            # Status label
-            cv2.putText(
-                hud_frame,
-                "TRACKING: LOCKED",
-                (8, preview_h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                (0, 255, 180),
-                1,
-                cv2.LINE_AA,
-            )
-        else:
+                # Status label
+                cv2.putText(
+                    hud_frame,
+                    "TRACKING: LOCKED",
+                    (8, preview_h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 255, 180),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        elif self._cascade is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self._cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4, minSize=(40, 40))
+            if len(faces) > 0:
+                face_detected = True
+                # Pick largest detected face
+                fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+                center_y = fy + fh / 2.0
+                raw_y = float(center_y / h)
+
+                mapped_y = (raw_y - self._min_y_bound) / max(0.01, (self._max_y_bound - self._min_y_bound))
+                mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
+
+                if self._is_first_sample:
+                    self._smoothed_y = mapped_y
+                    self._is_first_sample = False
+                else:
+                    alpha = self.config.ema_alpha
+                    self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
+
+                # Draw bounding box and center target on HUD preview
+                p_fx = int(fx * scale_x)
+                p_fy = int(fy * scale_y)
+                p_fw = int(fw * scale_x)
+                p_fh = int(fh * scale_y)
+                cv2.rectangle(hud_frame, (p_fx, p_fy), (p_fx + p_fw, p_fy + p_fh), (0, 240, 255), 1)
+                cx = p_fx + p_fw // 2
+                cy = p_fy + p_fh // 2
+                cv2.circle(hud_frame, (cx, cy), 4, (0, 255, 200), -1)
+
+                cv2.putText(
+                    hud_frame,
+                    "CASCADE: LOCKED",
+                    (8, preview_h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 255, 180),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        if not face_detected:
             # No face detected
             cv2.putText(
                 hud_frame,
@@ -173,8 +242,10 @@ class FaceMeshTracker:
         return face_detected, raw_y, self._smoothed_y, hud_rgb
 
     def close(self) -> None:
-        """Releases MediaPipe resources."""
-        self._face_mesh.close()
+        """Releases detector resources."""
+        if self._face_mesh is not None:
+            self._face_mesh.close()
+            self._face_mesh = None
 
 
 class VisionPipeline:

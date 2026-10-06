@@ -53,6 +53,12 @@ class SoundManager:
 
         # Convert to 16-bit signed PCM
         int16_samples = (audio_data * 32767).astype(np.int16)
+
+        mixer_init = pygame.mixer.get_init()
+        if mixer_init and mixer_init[2] == 2:
+            # Stereo: duplicate mono samples to both channels
+            int16_samples = np.column_stack((int16_samples, int16_samples))
+
         sound = pygame.sndarray.make_sound(int16_samples)
         return sound
 
