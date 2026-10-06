@@ -21,13 +21,16 @@ class AmbientParticle:
         self.speed_y = random.uniform(12.0, 26.0)
         self.phase = random.uniform(0.0, math.pi * 2)
         self.amplitude = random.uniform(8.0, 20.0)
-        self.size = random.uniform(1.5, 3.0)
+        self.size = int(max(1, round(random.uniform(1.5, 3.0))))
         self.color = random.choice([
             (0, 240, 255),    # Cyan
             (255, 45, 120),   # Pink
             (0, 255, 180),    # Emerald
             (140, 100, 255),  # Violet
         ])
+        # Pre-rendered surface to avoid dynamic Surface allocations every frame on Raspberry Pi
+        self._surf = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+        pygame.draw.circle(self._surf, (*self.color, 140), (self.size, self.size), self.size)
 
     def update_and_draw(self, surface: pygame.Surface, dt: float, time_sec: float) -> None:
         self.y -= self.speed_y * dt
@@ -36,11 +39,7 @@ class AmbientParticle:
             self.x = random.uniform(self.bounds.left + 10, self.bounds.right - 10)
 
         sway_x = self.x + math.sin(time_sec * 1.5 + self.phase) * self.amplitude
-        alpha = int(90 + 50 * math.sin(time_sec * 2.0 + self.phase))
-
-        p_surf = pygame.Surface((int(self.size * 2), int(self.size * 2)), pygame.SRCALPHA)
-        pygame.draw.circle(p_surf, (*self.color, max(20, min(200, alpha))), (int(self.size), int(self.size)), int(self.size))
-        surface.blit(p_surf, (int(sway_x - self.size), int(self.y - self.size)))
+        surface.blit(self._surf, (int(sway_x - self.size), int(self.y - self.size)))
 
 
 class NeonRenderer:
@@ -74,6 +73,35 @@ class NeonRenderer:
 
         # Ambient particles for deep arcade atmosphere
         self.ambient_motes = [AmbientParticle(self.arena_rect) for _ in range(25)]
+
+        # Pre-rendered surface cache to eliminate dynamic allocations at 60 FPS on Raspberry Pi
+        self._init_surface_cache()
+
+    def _init_surface_cache(self) -> None:
+        """Precomputes neon bloom surfaces to maintain rock-solid 60 FPS on Raspberry Pi."""
+        pw = self.config.physics.paddle_width + 8
+        ph = self.config.physics.paddle_height + 8
+        self._player_paddle_glow = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        pygame.draw.rect(self._player_paddle_glow, (*self.colors.player_glow, 75), self._player_paddle_glow.get_rect(), border_radius=6)
+
+        self._ai_paddle_glow = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        pygame.draw.rect(self._ai_paddle_glow, (*self.colors.ai_glow, 75), self._ai_paddle_glow.get_rect(), border_radius=6)
+
+        glow_radius = self.config.physics.ball_radius + 6
+        self._ball_glow_radius = glow_radius
+        self._ball_glow_surf = pygame.Surface((glow_radius * 2, glow_radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(self._ball_glow_surf, (*self.colors.ball_glow, 90), (glow_radius, glow_radius), glow_radius)
+
+        self._trail_surfs = []
+        for i in range(10):
+            fraction = (i + 1) / 10.0
+            r = max(1, int(self.config.physics.ball_radius * fraction * 0.8))
+            alpha = int(140 * fraction)
+            t_surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(t_surf, (*self.colors.ball_glow, alpha), (r, r), r)
+            self._trail_surfs.append((r, t_surf))
+
+        self._particle_cache = {}
 
     def update_geometry(self, screen: pygame.Surface, arena_rect: pygame.Rect) -> None:
         """Adapts renderer to new window dimensions."""
@@ -236,7 +264,8 @@ class NeonRenderer:
         if tracking_state.preview_surface_buffer is not None:
             raw_rgb = tracking_state.preview_surface_buffer
             cam_surface = pygame.image.frombuffer(raw_rgb.tobytes(), (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
-            scaled_cam = pygame.transform.smoothscale(cam_surface, (pw - 4, ph - 22))
+            # Fast nearest-neighbor hardware scale for high FPS on Raspberry Pi
+            scaled_cam = pygame.transform.scale(cam_surface, (pw - 4, ph - 22))
             self.screen.blit(scaled_cam, (px + 2, py + 2))
         else:
             placeholder = pygame.Surface((pw - 4, ph - 22))
@@ -249,13 +278,12 @@ class NeonRenderer:
         self.screen.blit(stat_surf, (px + 4, py + ph - 16))
 
     def render_paddle(self, paddle: Paddle, primary_color: Tuple[int, int, int], glow_color: Tuple[int, int, int]) -> None:
-        """Renders paddle with neon layered bloom."""
+        """Renders paddle with pre-cached neon layered bloom."""
         rect = paddle.rect
 
-        # Outer bloom glow
+        # Outer bloom glow from pre-rendered cache
+        glow_surf = self._player_paddle_glow if primary_color == self.colors.player_primary else self._ai_paddle_glow
         glow_rect = rect.inflate(8, 8)
-        glow_surf = pygame.Surface((glow_rect.width, glow_rect.height), pygame.SRCALPHA)
-        pygame.draw.rect(glow_surf, (*glow_color, 75), glow_surf.get_rect(), border_radius=6)
         self.screen.blit(glow_surf, glow_rect.topleft)
 
         # Solid inner paddle
@@ -266,37 +294,36 @@ class NeonRenderer:
             pygame.draw.rect(self.screen, (255, 255, 255), inner_rect, border_radius=2)
 
     def render_ball(self, ball: Ball) -> None:
-        """Renders ball with speed trail and radial neon bloom."""
-        # Draw fading comet trail
+        """Renders ball with speed trail and radial neon bloom using cached surfaces."""
+        # Draw fading comet trail from pre-rendered cache
         trail_pts = list(ball.trail)
         n = len(trail_pts)
         for i, pt in enumerate(trail_pts):
-            fraction = (i + 1) / max(1, n)
-            radius = int(ball.radius * fraction * 0.8)
-            if radius > 1:
-                alpha = int(140 * fraction)
-                trail_surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
-                pygame.draw.circle(trail_surf, (*self.colors.ball_glow, alpha), (radius, radius), radius)
-                self.screen.blit(trail_surf, (int(pt[0] - radius), int(pt[1] - radius)))
+            idx = min(9, int((i + 1) / max(1, n) * 9.99))
+            r, t_surf = self._trail_surfs[idx]
+            self.screen.blit(t_surf, (int(pt[0] - r), int(pt[1] - r)))
 
         bx, by = int(ball.x), int(ball.y)
 
-        # Outer glow ring
-        glow_radius = ball.radius + 6
-        glow_surf = pygame.Surface((glow_radius * 2, glow_radius * 2), pygame.SRCALPHA)
-        pygame.draw.circle(glow_surf, (*self.colors.ball_glow, 90), (glow_radius, glow_radius), glow_radius)
-        self.screen.blit(glow_surf, (bx - glow_radius, by - glow_radius))
+        # Outer glow ring from pre-rendered cache
+        gr = self._ball_glow_radius
+        self.screen.blit(self._ball_glow_surf, (bx - gr, by - gr))
 
         # Core ball
         pygame.draw.circle(self.screen, self.colors.ball_core, (bx, by), ball.radius)
 
     def render_particles(self, particle_system: ParticleSystem) -> None:
-        """Draws living collision spark particles."""
+        """Draws living collision spark particles using discrete cached surfaces."""
         for p in particle_system.particles:
             alpha_ratio = max(0.0, min(1.0, p.life / max(0.01, p.max_life)))
-            alpha = int(255 * alpha_ratio)
-            size = max(1, int(p.size * alpha_ratio))
-
-            p_surf = pygame.Surface((size * 2, size * 2), pygame.SRCALPHA)
-            pygame.draw.circle(p_surf, (*p.color, alpha), (size, size), size)
+            alpha_bucket = int(min(255, round(255 * alpha_ratio / 32.0) * 32))
+            if alpha_bucket <= 0:
+                continue
+            size = max(1, int(round(p.size * alpha_ratio)))
+            key = (p.color, size, alpha_bucket)
+            p_surf = self._particle_cache.get(key)
+            if p_surf is None:
+                p_surf = pygame.Surface((size * 2, size * 2), pygame.SRCALPHA)
+                pygame.draw.circle(p_surf, (*p.color, alpha_bucket), (size, size), size)
+                self._particle_cache[key] = p_surf
             self.screen.blit(p_surf, (int(p.x - size), int(p.y - size)))

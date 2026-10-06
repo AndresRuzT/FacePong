@@ -24,9 +24,9 @@ class CameraConfig:
     preview_height: int = 144
     flip_horizontal: bool = True
     # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
-    ema_alpha: float = 0.28
+    ema_alpha: float = 0.25
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
-    head_sensitivity: float = 3.6
+    head_sensitivity: float = 2.4
     # Calibration range spread around neutral head Y
     default_range_spread: float = 0.14
     # Inactivity timeout (seconds) before resetting match to attract screen

@@ -142,17 +142,20 @@ class FaceMeshTracker:
         raw_y = self._last_valid_raw_y
         now = time.perf_counter()
 
-        # Render preview HUD frame
+        # Render preview HUD frame: SIMD-accelerated dimming without extra zeros allocation
         preview_h = self.config.preview_height
         preview_w = self.config.preview_width
         hud_frame = cv2.resize(frame, (preview_w, preview_h), interpolation=cv2.INTER_LINEAR)
-        hud_frame = cv2.addWeighted(hud_frame, 0.45, np.zeros_like(hud_frame), 0.55, 0)
+        hud_frame = cv2.convertScaleAbs(hud_frame, alpha=0.45, beta=0)
 
         scale_x = preview_w / float(w)
         scale_y = preview_h / float(h)
 
         if self._face_mesh is not None:
+            # Set writeable=False to allow MediaPipe to pass frame by reference without memory copy
+            rgb_frame.flags.writeable = False
             results = self._face_mesh.process(rgb_frame)
+            rgb_frame.flags.writeable = True
             if results.multi_face_landmarks:
                 raw_face_detected = True
                 landmarks = results.multi_face_landmarks[0].landmark
@@ -248,14 +251,23 @@ class FaceMeshTracker:
                 self._min_y_bound = raw_y
                 self._max_y_bound = self._min_y_bound + span
 
-            # Map raw_y into normalized [0.0, 1.0]
-            mapped_y = (raw_y - self._min_y_bound) / span
-            mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
+            # Map raw_y into normalized linear [0.0, 1.0]
+            linear_y = (raw_y - self._min_y_bound) / span
+            linear_y = float(np.clip(linear_y, 0.0, 1.0))
+
+            # Ergonomic progressive sensitivity curve:
+            # Softens micro-movements around the neutral center for intuitive fine-control,
+            # while scaling up smoothly for effortless reach towards the boundaries.
+            u = 2.0 * (linear_y - 0.5)
+            abs_u = abs(u)
+            sign_u = 1.0 if u >= 0 else -1.0
+            curved_u = sign_u * (0.65 * abs_u + 0.35 * (abs_u ** 1.35))
+            mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
             # Dynamic Adaptive Alpha:
             # Use base_alpha for stillness/subtle movements to eliminate micro-jitter,
             # and smoothly scale up to 0.85 during sudden head flicks for instant response.
-            base_alpha = getattr(self.config, "ema_alpha", 0.28)
+            base_alpha = getattr(self.config, "ema_alpha", 0.25)
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
