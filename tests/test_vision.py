@@ -24,6 +24,19 @@ class TestVisionTracker(unittest.TestCase):
         self.assertFalse(detected)
         self.assertEqual(hud_preview.shape, (self.config.preview_height, self.config.preview_width, 3))
 
+    def test_camera_manual_selection(self):
+        from facepong.vision.camera import find_preferred_camera_device
+        idx, desc = find_preferred_camera_device(requested_index=2)
+        self.assertEqual(idx, 2)
+        self.assertIn("2", desc)
+
+    def test_camera_auto_detection_returns_valid_device(self):
+        from facepong.vision.camera import find_preferred_camera_device
+        idx, desc = find_preferred_camera_device(requested_index=None)
+        self.assertIsInstance(idx, int)
+        self.assertGreaterEqual(idx, 0)
+        self.assertTrue(len(desc) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()

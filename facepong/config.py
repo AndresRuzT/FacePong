@@ -1,7 +1,7 @@
 """Configuration parameters for FacePong."""
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class DisplayConfig:
 
 @dataclass(frozen=True)
 class CameraConfig:
-    device_index: int = 0
+    device_index: Optional[int] = None
     capture_width: int = 320
     capture_height: int = 240
     target_fps: int = 30

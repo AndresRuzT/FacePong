@@ -27,7 +27,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1280, help="Display resolution width (default: 1280)")
     parser.add_argument("--height", type=int, default=720, help="Display resolution height (default: 720)")
     parser.add_argument("--fullscreen", action="store_true", help="Launch in fullscreen mode for kiosks")
-    parser.add_argument("--camera", type=int, default=0, help="Webcam device index (default: 0)")
+    parser.add_argument("--camera", type=int, default=None, help="Camera device index (default: auto-detect prioritizing USB cameras)")
     parser.add_argument("--cam-width", type=int, default=320, help="Camera capture width (default: 320)")
     parser.add_argument("--cam-height", type=int, default=240, help="Camera capture height (default: 240)")
     parser.add_argument("--alpha", type=float, default=0.22, help="EMA smoothing factor for head tracking (default: 0.22)")
