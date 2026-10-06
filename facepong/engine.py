@@ -81,6 +81,11 @@ class GameEngine:
         # Keyboard override tracker
         self._keyboard_active = False
 
+        # State transition and calibration tracking
+        self._previous_state = ExhibitionState.ATTRACT
+        self._last_calibration_second = -1
+        self._calibration_progress = 0.0
+
     def start(self) -> None:
         """Starts background threads and executes the main loop."""
         self.vision.start()
@@ -121,7 +126,6 @@ class GameEngine:
                 elif event.key == pygame.K_SPACE:
                     if self.state_mgr.current_state == ExhibitionState.ATTRACT:
                         self.state_mgr.change_state(ExhibitionState.CALIBRATING)
-                        self.vision.begin_calibration()
                     elif self.state_mgr.current_state == ExhibitionState.GAME_OVER:
                         self.state_mgr.reset_to_attract()
 
@@ -150,6 +154,16 @@ class GameEngine:
         )
         if timed_out:
             logger.info("Match canceled due to player inactivity. Returning to attract mode.")
+
+        # Re-fetch state in case watchdog triggered a transition
+        state = self.state_mgr.current_state
+
+        # Detect transition into CALIBRATING (from watchdog, keyboard, or auto)
+        if state == ExhibitionState.CALIBRATING and self._previous_state != ExhibitionState.CALIBRATING:
+            self.vision.begin_calibration()
+            self._last_calibration_second = -1
+            self._calibration_progress = 0.0
+        self._previous_state = state
 
         # Update player paddle from face tracking if not actively using keyboard
         if tracking_state.face_detected and not self._keyboard_active:
@@ -200,7 +214,19 @@ class GameEngine:
         self.player_paddle.update(dt)
         self.ai_paddle.update(dt)
 
-        if tracking_state.is_calibrated or tracking_state.calibration_progress >= 1.0:
+        now = time.perf_counter()
+        elapsed = now - self.state_mgr.state_enter_time
+        duration = max(0.1, self.config.camera.calibration_duration_sec)
+        self._calibration_progress = min(1.0, elapsed / duration)
+
+        # Trigger countdown beeps (3, 2, 1)
+        remaining_seconds = max(1, math.ceil(duration - elapsed))
+        if remaining_seconds != self._last_calibration_second:
+            self._last_calibration_second = remaining_seconds
+            self.sound.play("beep")
+
+        if self._calibration_progress >= 1.0 or tracking_state.is_calibrated:
+            self.vision.finish_calibration()
             self.state_mgr.start_new_match()
             self.ball.serve(direction_to_player=True)
             self.sound.play("start")
@@ -295,7 +321,7 @@ class GameEngine:
             self.screens.draw_attract_screen(tracking_state)
 
         elif state == ExhibitionState.CALIBRATING:
-            self.screens.draw_calibration_screen(tracking_state, tracking_state.calibration_progress)
+            self.screens.draw_calibration_screen(tracking_state, self._calibration_progress)
 
         elif state in (ExhibitionState.PLAYING, ExhibitionState.POINT_SCORED):
             self.renderer.render_paddle(self.player_paddle, self.config.colors.player_primary, self.config.colors.player_glow)

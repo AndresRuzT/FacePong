@@ -284,6 +284,13 @@ class VisionPipeline:
             self._calibrating = True
             self._calibration_start_time = time.perf_counter()
             self._calibration_samples.clear()
+            self._state.is_calibrated = False
+            self._state.calibration_progress = 0.0
+
+    def finish_calibration(self) -> None:
+        """Computes calibrated baseline and finalizes calibration state."""
+        with self._lock:
+            self._finish_calibration()
 
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS."""

@@ -41,6 +41,15 @@ class TestGameStateManager(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertEqual(self.mgr.current_state, ExhibitionState.ATTRACT)
 
+    def test_face_detection_triggers_calibration(self):
+        # Face seen steadily
+        now = time.perf_counter()
+        self.mgr.update_watchdog(face_detected=True, last_detected_time=now, dt=0.016)
+        # Advance by 0.9s
+        self.mgr._face_seen_start_time = now - 0.9
+        self.mgr.update_watchdog(face_detected=True, last_detected_time=now, dt=0.016)
+        self.assertEqual(self.mgr.current_state, ExhibitionState.CALIBRATING)
+
 
 if __name__ == "__main__":
     unittest.main()
