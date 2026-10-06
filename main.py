@@ -30,7 +30,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=None, help="Camera device index (default: auto-detect prioritizing USB cameras)")
     parser.add_argument("--cam-width", type=int, default=320, help="Camera capture width (default: 320)")
     parser.add_argument("--cam-height", type=int, default=240, help="Camera capture height (default: 240)")
-    parser.add_argument("--alpha", type=float, default=0.22, help="EMA smoothing factor for head tracking (default: 0.22)")
+    parser.add_argument("--alpha", type=float, default=0.28, help="EMA smoothing factor for head tracking (default: 0.28)")
+    parser.add_argument("--sensitivity", type=float, default=2.4, help="Head motion sensitivity multiplier (default: 2.4)")
     parser.add_argument("--timeout", type=float, default=5.0, help="Player absence timeout in seconds (default: 5.0)")
     parser.add_argument("--win-score", type=int, default=5, help="Points needed to win match (default: 5)")
     parser.add_argument("--no-sound", action="store_true", help="Disable procedural audio synthesis")
@@ -59,6 +60,7 @@ def main() -> int:
             capture_width=args.cam_width,
             capture_height=args.cam_height,
             ema_alpha=args.alpha,
+            head_sensitivity=args.sensitivity,
             inactivity_timeout_sec=args.timeout,
         ),
         physics=PhysicsConfig(

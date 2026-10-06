@@ -62,9 +62,12 @@ class FaceMeshTracker:
         self._smoothed_y: float = 0.5
         self._is_first_sample: bool = True
 
-        # Calibration bounds
-        self._min_y_bound: float = config.default_min_y
-        self._max_y_bound: float = config.default_max_y
+        # Sensitivity-aware calibration bounds
+        sensitivity = max(0.5, getattr(config, "head_sensitivity", 2.4))
+        base_spread = getattr(config, "default_range_spread", 0.14)
+        initial_spread = base_spread / sensitivity
+        self._min_y_bound: float = max(0.02, 0.5 - initial_spread)
+        self._max_y_bound: float = min(0.98, 0.5 + initial_spread)
         self._calibration_samples: List[float] = []
 
         # MediaPipe initialization with OpenCV Cascade fallback
@@ -94,12 +97,18 @@ class FaceMeshTracker:
         except Exception as exc:
             logger.error("Failed to initialize OpenCV Cascade fallback: %s", exc)
 
-    def calibrate_baseline(self, neutral_y: float, range_spread: float = 0.22) -> None:
-        """Sets comfortable dynamic range around player's neutral head position."""
-        self._min_y_bound = max(0.05, neutral_y - range_spread)
-        self._max_y_bound = min(0.95, neutral_y + range_spread)
-        logger.info("Calibrated head range: [%.2f, %.2f] around neutral %.2f",
-                    self._min_y_bound, self._max_y_bound, neutral_y)
+    def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None) -> None:
+        """Sets comfortable dynamic range around player's neutral head position based on sensitivity."""
+        if range_spread is None:
+            sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
+            base_spread = getattr(self.config, "default_range_spread", 0.14)
+            range_spread = base_spread / sensitivity
+        self._min_y_bound = max(0.02, neutral_y - range_spread)
+        self._max_y_bound = min(0.98, neutral_y + range_spread)
+        logger.info(
+            "Calibrated head range: [%.2f, %.2f] around neutral %.2f (effective spread: ±%.3f)",
+            self._min_y_bound, self._max_y_bound, neutral_y, range_spread,
+        )
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
         """

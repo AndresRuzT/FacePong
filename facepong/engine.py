@@ -99,14 +99,18 @@ class GameEngine:
         self._calibration_progress = 0.0
 
     def _calculate_arena_geometry(self, w: int, h: int) -> None:
-        """Computes rectangular playfield arena leaving top header for HUD/PIP."""
+        """Computes rectangular playfield arena leaving top header for HUD/PIP and shortening width by 15%."""
         header_h = 118
         margin_x = 24
         margin_b = 18
+        available_w = max(300, w - 2 * margin_x)
+        # Shorten horizontal distance by 15% for faster, more dynamic rallies
+        arena_w = int(available_w * 0.85)
+        arena_left = (w - arena_w) // 2
         self.arena_rect = pygame.Rect(
-            margin_x,
+            arena_left,
             header_h,
-            max(200, w - 2 * margin_x),
+            arena_w,
             max(200, h - header_h - margin_b),
         )
 
