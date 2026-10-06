@@ -45,12 +45,19 @@ class Paddle:
         max_center = self.max_y - half_h - 4
         self.target_y = min_center + norm_y * (max_center - min_center)
 
+    def reset_to_center(self, center_y: float) -> None:
+        """Immediately snaps paddle to vertical center coordinate."""
+        self.target_y = float(center_y)
+        self.y = float(center_y)
+        self.clamp_target()
+        self._update_rect()
+
     def move_keyboard(self, direction: float, dt: float) -> None:
         """Moves paddle by directional input (-1.0 up, 1.0 down)."""
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_factor: float = 24.0) -> None:
+    def update(self, dt: float, smooth_factor: float = 38.0) -> None:
         """Smoothly interpolates paddle position towards target coordinate."""
         diff = self.target_y - self.y
         self.y += diff * min(1.0, smooth_factor * dt)

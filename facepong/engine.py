@@ -213,9 +213,10 @@ class GameEngine:
             self._calibration_progress = 0.0
         self._previous_state = state
 
-        # Update player paddle from face tracking if not actively using keyboard
-        if tracking_state.face_detected and not self._keyboard_active:
-            self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
+        # Update player paddle from face tracking during active gameplay
+        if state == ExhibitionState.PLAYING:
+            if tracking_state.face_detected and not self._keyboard_active:
+                self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
 
         # Update particle effects
         self.particles.update(dt)
@@ -279,6 +280,9 @@ class GameEngine:
         if self._calibration_progress >= 1.0 or tracking_state.is_calibrated:
             self.vision.finish_calibration()
             self.state_mgr.start_new_match()
+            center_y = float(self.arena_rect.centery)
+            self.player_paddle.reset_to_center(center_y)
+            self.ai_paddle.reset_to_center(center_y)
             self.ball.serve(direction_to_player=True)
             self.sound.play("start")
             self.state_mgr.change_state(ExhibitionState.PLAYING)
@@ -324,6 +328,10 @@ class GameEngine:
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
                 self.state_mgr.pause_timer = self.config.physics.goal_pause_sec
+                # Smoothly target arena center for both paddles
+                center_y = float(self.arena_rect.centery)
+                self.player_paddle.target_y = center_y
+                self.ai_paddle.target_y = center_y
 
         elif self.ball.x > self.arena_rect.right:
             # Player Scored
@@ -341,14 +349,24 @@ class GameEngine:
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
                 self.state_mgr.pause_timer = self.config.physics.goal_pause_sec
+                # Smoothly target arena center for both paddles
+                center_y = float(self.arena_rect.centery)
+                self.player_paddle.target_y = center_y
+                self.ai_paddle.target_y = center_y
 
     def _update_point_scored_mode(self, dt: float) -> None:
-        """Brief interlude before launching next ball serve."""
-        self.player_paddle.update(dt)
-        self.ai_paddle.update(dt)
+        """Brief interlude before launching next ball serve; smoothly centers both paddles."""
+        center_y = float(self.arena_rect.centery)
+        self.player_paddle.target_y = center_y
+        self.ai_paddle.target_y = center_y
+        self.player_paddle.update(dt, smooth_factor=16.0)
+        self.ai_paddle.update(dt, smooth_factor=16.0)
 
         self.state_mgr.pause_timer -= dt
         if self.state_mgr.pause_timer <= 0:
+            # Snap cleanly to center baseline right before serve
+            self.player_paddle.reset_to_center(center_y)
+            self.ai_paddle.reset_to_center(center_y)
             serve_to_player = (self.ball.x < self.arena_rect.centerx)
             self.ball.serve(direction_to_player=serve_to_player)
             self.sound.play("beep")

@@ -24,6 +24,7 @@ def open_video_capture(device_index: int) -> Optional[cv2.VideoCapture]:
         try:
             cap = cv2.VideoCapture(device_index, backend)
             if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 return cap
             cap.release()
         except Exception:
@@ -172,7 +173,8 @@ class ThreadedCamera:
         self._is_opened = False
         self._use_synthetic = False
 
-        # Watchdog and hotplug state
+        # Watchdog, hotplug and switch detection state
+        self.device_change_counter = 0
         self._consecutive_failures = 0
         self._last_reconnect_attempt = 0.0
         self._last_usb_check = 0.0
@@ -189,6 +191,7 @@ class ThreadedCamera:
         for attempt in range(2):
             cap = open_video_capture(idx)
             if cap is not None and cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
                 cap.set(cv2.CAP_PROP_FPS, self.target_fps)
@@ -196,6 +199,7 @@ class ThreadedCamera:
                 self._is_opened = True
                 self._use_synthetic = False
                 self._consecutive_failures = 0
+                self.device_change_counter += 1
                 return True
             time.sleep(0.15)
         return False

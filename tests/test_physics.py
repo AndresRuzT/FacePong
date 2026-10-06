@@ -26,6 +26,13 @@ class TestPhysicsAndEntities(unittest.TestCase):
         paddle.clamp_target()
         self.assertLessEqual(paddle.target_y, self.screen_h - half_h - 10)
 
+    def test_paddle_reset_to_center(self):
+        paddle = Paddle(x=50, y=100, width=16, height=100, screen_height=self.screen_h)
+        paddle.reset_to_center(360.0)
+        self.assertAlmostEqual(paddle.y, 360.0)
+        self.assertAlmostEqual(paddle.target_y, 360.0)
+        self.assertEqual(paddle.rect.centery, 360)
+
     def test_ball_wall_bounce(self):
         ball = Ball(self.screen_w, self.screen_h, self.config)
         ball.x = 640

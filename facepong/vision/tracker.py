@@ -1,9 +1,9 @@
-"""MediaPipe Face Mesh tracker with exponential moving average filtering."""
+"""MediaPipe Face Mesh tracker with exponential moving average filtering and adaptive baseline."""
 
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import cv2
@@ -46,17 +46,10 @@ class TrackingState:
 
 
 class FaceMeshTracker:
-    """Processes camera frames to track facial position and produce HUD previews."""
+    """Processes camera frames to track facial position, produce HUD previews, and auto-anchor baseline."""
 
     def __init__(self, config: CameraConfig):
         self.config = config
-        self._mp_face_mesh = mp.solutions.face_mesh
-        self._face_mesh = self._mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=False,  # Set to False for higher FPS on Raspberry Pi
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
 
         # Exponential Moving Average state
         self._smoothed_y: float = 0.5
@@ -70,7 +63,14 @@ class FaceMeshTracker:
         self._max_y_bound: float = min(0.98, 0.5 + initial_spread)
         self._calibration_samples: List[float] = []
 
-        # MediaPipe initialization with OpenCV Cascade fallback
+        # Grace period & adaptive recentering state
+        self._recenter_needed: bool = False
+        self._clamped_at_min_count: int = 0
+        self._clamped_at_max_count: int = 0
+        self._last_valid_raw_y: float = 0.5
+        self._last_valid_detection_time: float = 0.0
+
+        # Detectors
         self._face_mesh = None
         self._cascade = None
         self._init_detector()
@@ -79,13 +79,14 @@ class FaceMeshTracker:
         """Initializes MediaPipe Face Mesh or falls back to OpenCV Haar Cascade."""
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+                # Use 0.45 detection confidence for superior distance tracking
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                     max_num_faces=1,
-                    refine_landmarks=False,  # Set to False for higher FPS on Raspberry Pi
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5,
+                    refine_landmarks=False,  # Higher FPS on Raspberry Pi
+                    min_detection_confidence=0.45,
+                    min_tracking_confidence=0.45,
                 )
-                logger.info("MediaPipe Face Mesh tracker initialized")
+                logger.info("MediaPipe Face Mesh tracker initialized (confidence 0.45)")
                 return
         except Exception as exc:
             logger.warning("MediaPipe initialization failed (%s). Falling back to OpenCV Cascade.", exc)
@@ -96,6 +97,14 @@ class FaceMeshTracker:
             logger.info("OpenCV Haar Cascade face tracker initialized as fallback")
         except Exception as exc:
             logger.error("Failed to initialize OpenCV Cascade fallback: %s", exc)
+
+    def reset_for_new_camera(self) -> None:
+        """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
+        self._recenter_needed = True
+        self._is_first_sample = True
+        self._clamped_at_min_count = 0
+        self._clamped_at_max_count = 0
+        logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
 
     def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None) -> None:
         """Sets comfortable dynamic range around player's neutral head position based on sensitivity."""
@@ -112,24 +121,25 @@ class FaceMeshTracker:
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
         """
-        Executes face mesh detection, extracts smoothed Y, and renders a cyber HUD frame.
-        
+        Executes face detection, extracts smoothed Y, adapts baseline if clamped,
+        and renders cyber HUD preview.
+
         Returns:
-            Tuple of (face_detected, raw_y, smoothed_y, hud_rgb_preview)
+            Tuple of (effective_face_detected, raw_y, smoothed_y, hud_rgb_preview)
         """
         if self.config.flip_horizontal:
             frame = cv2.flip(frame, 1)
 
         h, w, _ = frame.shape
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_detected = False
-        raw_y = 0.5
+        raw_face_detected = False
+        raw_y = self._last_valid_raw_y
+        now = time.perf_counter()
 
         # Render preview HUD frame
         preview_h = self.config.preview_height
         preview_w = self.config.preview_width
         hud_frame = cv2.resize(frame, (preview_w, preview_h), interpolation=cv2.INTER_LINEAR)
-        # Apply dark cyberpunk tint
         hud_frame = cv2.addWeighted(hud_frame, 0.45, np.zeros_like(hud_frame), 0.55, 0)
 
         scale_x = preview_w / float(w)
@@ -138,49 +148,27 @@ class FaceMeshTracker:
         if self._face_mesh is not None:
             results = self._face_mesh.process(rgb_frame)
             if results.multi_face_landmarks:
-                face_detected = True
+                raw_face_detected = True
                 landmarks = results.multi_face_landmarks[0].landmark
-
-                # Extract nose tip
                 nose_point = landmarks[NOSE_TIP_IDX]
                 raw_y = float(nose_point.y)
-
-                # Map raw_y according to calibrated bounds into [0.0, 1.0]
-                mapped_y = (raw_y - self._min_y_bound) / max(0.01, (self._max_y_bound - self._min_y_bound))
-                mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
-
-                # Apply Exponential Moving Average (EMA)
-                if self._is_first_sample:
-                    self._smoothed_y = mapped_y
-                    self._is_first_sample = False
-                else:
-                    alpha = self.config.ema_alpha
-                    self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
 
                 # Render futuristic landmarks onto HUD preview
                 nose_px = int(nose_point.x * preview_w)
                 nose_py = int(nose_point.y * preview_h)
 
-                # Draw outer contour points
                 for idx in CONTOUR_KEYPOINTS:
                     pt = landmarks[idx]
-                    px = int(pt.x * preview_w)
-                    py = int(pt.y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 1, (0, 180, 255), -1)
+                    cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 1, (0, 180, 255), -1)
 
-                # Draw eyes and chin markers
                 for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
                     pt = landmarks[idx]
-                    px = int(pt.x * preview_w)
-                    py = int(pt.y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 2, (255, 0, 180), -1)
+                    cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 2, (255, 0, 180), -1)
 
-                # Draw animated cyber reticle on nose tip
                 cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
                 cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
                 cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
 
-                # Status label
                 cv2.putText(
                     hud_frame,
                     "TRACKING: LOCKED",
@@ -194,25 +182,13 @@ class FaceMeshTracker:
 
         elif self._cascade is not None:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self._cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4, minSize=(40, 40))
+            faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=3, minSize=(30, 30))
             if len(faces) > 0:
-                face_detected = True
-                # Pick largest detected face
+                raw_face_detected = True
                 fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
                 center_y = fy + fh / 2.0
                 raw_y = float(center_y / h)
 
-                mapped_y = (raw_y - self._min_y_bound) / max(0.01, (self._max_y_bound - self._min_y_bound))
-                mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
-
-                if self._is_first_sample:
-                    self._smoothed_y = mapped_y
-                    self._is_first_sample = False
-                else:
-                    alpha = self.config.ema_alpha
-                    self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
-
-                # Draw bounding box and center target on HUD preview
                 p_fx = int(fx * scale_x)
                 p_fy = int(fy * scale_y)
                 p_fw = int(fw * scale_x)
@@ -233,22 +209,80 @@ class FaceMeshTracker:
                     cv2.LINE_AA,
                 )
 
-        if not face_detected:
-            # No face detected
-            cv2.putText(
-                hud_frame,
-                "NO FACE DETECTED",
-                (8, preview_h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                (0, 70, 255),
-                1,
-                cv2.LINE_AA,
-            )
+        if raw_face_detected:
+            self._last_valid_raw_y = raw_y
+            self._last_valid_detection_time = now
+            effective_detected = True
 
-        # Convert HUD frame to RGB for Pygame
+            # Re-anchor baseline immediately if camera was switched or requested
+            if self._recenter_needed:
+                self.calibrate_baseline(raw_y)
+                self._smoothed_y = 0.5
+                self._is_first_sample = True
+                self._recenter_needed = False
+                logger.info("Auto-recalibrated neutral baseline to %.2f on new camera frame", raw_y)
+
+            # Map raw_y into [0.0, 1.0]
+            span = max(0.01, (self._max_y_bound - self._min_y_bound))
+            mapped_y = (raw_y - self._min_y_bound) / span
+            mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
+
+            # Auto-drift adaptation: if player shifted posture and stays pinned at boundary for 15 frames (~0.5s)
+            if mapped_y <= 0.01:
+                self._clamped_at_min_count += 1
+                self._clamped_at_max_count = 0
+                if self._clamped_at_min_count >= 15:
+                    current_center = (self._min_y_bound + self._max_y_bound) / 2.0
+                    self.calibrate_baseline(current_center - 0.02)
+                    self._clamped_at_min_count = 0
+            elif mapped_y >= 0.99:
+                self._clamped_at_max_count += 1
+                self._clamped_at_min_count = 0
+                if self._clamped_at_max_count >= 15:
+                    current_center = (self._min_y_bound + self._max_y_bound) / 2.0
+                    self.calibrate_baseline(current_center + 0.02)
+                    self._clamped_at_max_count = 0
+            else:
+                self._clamped_at_min_count = 0
+                self._clamped_at_max_count = 0
+
+            # Exponential Moving Average (EMA)
+            if self._is_first_sample:
+                self._smoothed_y = mapped_y
+                self._is_first_sample = False
+            else:
+                alpha = self.config.ema_alpha
+                self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
+
+        else:
+            # Grace period (0.35s): prevents paddle stutter during blinks or quick head tilts at distance
+            if (now - self._last_valid_detection_time) < 0.35 and not self._is_first_sample:
+                effective_detected = True
+                cv2.putText(
+                    hud_frame,
+                    "TRACKING: HOLD",
+                    (8, preview_h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 200, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+            else:
+                effective_detected = False
+                cv2.putText(
+                    hud_frame,
+                    "NO FACE DETECTED",
+                    (8, preview_h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 70, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+
         hud_rgb = cv2.cvtColor(hud_frame, cv2.COLOR_BGR2RGB)
-        return face_detected, raw_y, self._smoothed_y, hud_rgb
+        return effective_detected, raw_y, self._smoothed_y, hud_rgb
 
     def close(self) -> None:
         """Releases detector resources."""
@@ -274,6 +308,9 @@ class VisionPipeline:
         self._lock = threading.Lock()
         self._is_running = False
         self._worker_thread: Optional[threading.Thread] = None
+
+        # Watchdog for camera hardware switches
+        self._last_camera_device_counter: int = 0
 
         # Calibration tracking
         self._calibrating = False
@@ -301,11 +338,22 @@ class VisionPipeline:
         with self._lock:
             self._finish_calibration()
 
+    def recenter_baseline(self) -> None:
+        """Forces tracker to re-anchor neutral position on next frame."""
+        self.tracker.reset_for_new_camera()
+
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS."""
         frame_interval = 1.0 / max(1, self.config.target_fps)
         while self._is_running:
             loop_start = time.perf_counter()
+
+            # Detect hardware camera switch (e.g. unplug USB -> fallback to integrated)
+            dev_counter = getattr(self.camera, "device_change_counter", 0)
+            if dev_counter != self._last_camera_device_counter:
+                self._last_camera_device_counter = dev_counter
+                self.tracker.reset_for_new_camera()
+                logger.info("VisionPipeline detected camera device change (counter %d). Resetting tracker.", dev_counter)
 
             has_frame, frame = self.camera.read()
             if has_frame and frame is not None:
@@ -324,7 +372,7 @@ class VisionPipeline:
                     if self._calibrating:
                         if detected:
                             self._calibration_samples.append(raw_y)
-                        
+
                         elapsed = now - self._calibration_start_time
                         progress = min(1.0, elapsed / max(0.1, self.config.calibration_duration_sec))
                         self._state.calibration_progress = progress

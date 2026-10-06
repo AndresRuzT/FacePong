@@ -51,6 +51,12 @@ class TestVisionTracker(unittest.TestCase):
         synth = cam._generate_synthetic_frame()
         self.assertEqual(synth.shape, (120, 160, 3))
 
+    def test_reset_for_new_camera_flags_recenter(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker._recenter_needed = False
+        tracker.reset_for_new_camera()
+        self.assertTrue(tracker._recenter_needed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,14 +17,14 @@ class DisplayConfig:
 @dataclass(frozen=True)
 class CameraConfig:
     device_index: Optional[int] = None
-    capture_width: int = 320
-    capture_height: int = 240
+    capture_width: int = 640
+    capture_height: int = 480
     target_fps: int = 30
     preview_width: int = 192
     preview_height: int = 144
     flip_horizontal: bool = True
     # EMA smoothing alpha: lower = smoother but slower, higher = faster response
-    ema_alpha: float = 0.28
+    ema_alpha: float = 0.35
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
     head_sensitivity: float = 2.4
     # Calibration range spread around neutral head Y (smaller = higher sensitivity)
@@ -50,7 +50,7 @@ class PhysicsConfig:
     ball_speed_step: float = 30.0         # px/sec added per paddle bounce
     max_bounce_angle_deg: float = 60.0
     winning_score: int = 5
-    goal_pause_sec: float = 1.0
+    goal_pause_sec: float = 1.2
 
 
 @dataclass(frozen=True)
