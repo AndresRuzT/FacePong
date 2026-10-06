@@ -189,17 +189,19 @@ class FaceMeshTracker:
         # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur during sudden head flick)
         if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=3, minSize=(30, 30))
+            # Downscale 2x for fast execution without frame drops
+            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
+            faces = self._cascade.detectMultiScale(small_gray, scaleFactor=1.2, minNeighbors=3, minSize=(20, 20))
             if len(faces) > 0:
                 raw_face_detected = True
                 fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                center_y = fy + fh / 2.0
+                center_y = (fy * 2.0) + (fh * 2.0) / 2.0
                 raw_y = float(center_y / h)
 
-                p_fx = int(fx * scale_x)
-                p_fy = int(fy * scale_y)
-                p_fw = int(fw * scale_x)
-                p_fh = int(fh * scale_y)
+                p_fx = int(fx * 2.0 * scale_x)
+                p_fy = int(fy * 2.0 * scale_y)
+                p_fw = int(fw * 2.0 * scale_x)
+                p_fh = int(fh * 2.0 * scale_y)
                 cv2.rectangle(hud_frame, (p_fx, p_fy), (p_fx + p_fw, p_fy + p_fh), (0, 240, 255), 1)
                 cx = p_fx + p_fw // 2
                 cy = p_fy + p_fh // 2
@@ -235,23 +237,46 @@ class FaceMeshTracker:
                 self._recenter_needed = False
                 logger.info("Auto-recalibrated neutral baseline to %.2f on new camera frame", raw_y)
 
-            # Map raw_y into normalized [0.0, 1.0]
+            # Anti-deadband dynamic window tracking:
+            # If the user moves beyond calibrated bounds during a sudden flick,
+            # shift the active window so there is zero dead zone when reversing direction!
             span = max(0.01, (self._max_y_bound - self._min_y_bound))
+            if raw_y > self._max_y_bound:
+                self._max_y_bound = raw_y
+                self._min_y_bound = self._max_y_bound - span
+            elif raw_y < self._min_y_bound:
+                self._min_y_bound = raw_y
+                self._max_y_bound = self._min_y_bound + span
+
+            # Map raw_y into normalized [0.0, 1.0]
             mapped_y = (raw_y - self._min_y_bound) / span
             mapped_y = float(np.clip(mapped_y, 0.0, 1.0))
 
-            # Stable Low-Pass EMA filtering for silky smooth, monotonic tracking
-            alpha = getattr(self.config, "ema_alpha", 0.26)
+            # Dynamic Adaptive Alpha:
+            # Use base_alpha for stillness/subtle movements to eliminate micro-jitter,
+            # and smoothly scale up to 0.85 during sudden head flicks for instant response.
+            base_alpha = getattr(self.config, "ema_alpha", 0.28)
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
             else:
-                self._smoothed_y = (alpha * mapped_y) + ((1.0 - alpha) * self._smoothed_y)
+                diff = abs(mapped_y - self._smoothed_y)
+                alpha_boost = min(1.0, (diff / 0.12) ** 1.3)
+                effective_alpha = base_alpha + (0.85 - base_alpha) * alpha_boost
+                self._smoothed_y = (effective_alpha * mapped_y) + ((1.0 - effective_alpha) * self._smoothed_y)
 
         else:
-            # Grace period (0.35s): maintains smooth tracking during momentary blinks
+            # Grace period (0.35s): maintains smooth tracking during momentary blinks / motion blur
             if (now - self._last_valid_detection_time) < 0.35 and not self._is_first_sample:
                 effective_detected = True
+                # Inertial coasting during momentary detector drop prevents freezing/stuck paddle
+                if abs(self._velocity_y) > 0.05:
+                    span = max(0.01, (self._max_y_bound - self._min_y_bound))
+                    dt_grace = max(0.001, now - self._last_raw_y_sample_time)
+                    delta_norm = (self._velocity_y * dt_grace) / span
+                    self._smoothed_y = float(np.clip(self._smoothed_y + delta_norm * 0.35, 0.0, 1.0))
+                    self._velocity_y *= 0.80
+
                 cv2.putText(
                     hud_frame,
                     "TRACKING: HOLD",

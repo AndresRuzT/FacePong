@@ -23,8 +23,8 @@ class CameraConfig:
     preview_width: int = 192
     preview_height: int = 144
     flip_horizontal: bool = True
-    # EMA smoothing alpha: smooth low-pass filtering for zero-jitter, continuous tracking
-    ema_alpha: float = 0.32
+    # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
+    ema_alpha: float = 0.28
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
     head_sensitivity: float = 3.6
     # Calibration range spread around neutral head Y
@@ -44,9 +44,10 @@ class PhysicsConfig:
     paddle_height: int = 110
     paddle_margin: int = 35
     paddle_speed_keyboard: float = 650.0  # px/sec
-    paddle_max_speed: float = 2800.0       # px/sec fast, responsive arcade speed
+    paddle_max_speed: float = 4800.0       # px/sec fast, responsive arcade speed
     ball_radius: int = 8
-    ball_initial_speed: float = 520.0     # px/sec
+    ball_serve_speed: float = 340.0       # px/sec readable, gentle launch speed on serve
+    ball_initial_speed: float = 520.0     # px/sec full gameplay rally speed
     ball_max_speed: float = 1100.0        # px/sec
     ball_speed_step: float = 30.0         # px/sec added per paddle bounce
     max_bounce_angle_deg: float = 60.0

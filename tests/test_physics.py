@@ -66,6 +66,25 @@ class TestPhysicsAndEntities(unittest.TestCase):
         self.assertTrue(hit)
         self.assertGreater(ball.vx, 0)  # Rebounds to the right
 
+    def test_ball_serve_characteristics(self):
+        ball = Ball(self.screen_w, self.screen_h, self.config)
+        ball.serve(direction_to_player=True)
+        # Serve speed should match ball_serve_speed
+        self.assertEqual(ball.speed, self.config.ball_serve_speed)
+        self.assertTrue(ball.is_serve_in_flight)
+        # Trajectory should be heading towards player (vx < 0) and almost horizontal
+        self.assertLess(ball.vx, 0)
+        self.assertLess(abs(ball.vy), abs(ball.vx) * 0.15)  # within ±8.5 degrees
+
+        # When hitting paddle on serve, speed should ramp up to at least ball_initial_speed
+        paddle = Paddle(x=50, y=360, width=20, height=100, screen_height=self.screen_h)
+        ball.x = paddle.rect.right + 2
+        ball.y = 360
+        hit = ball.handle_paddle_collision(paddle, is_player=True)
+        self.assertTrue(hit)
+        self.assertFalse(ball.is_serve_in_flight)
+        self.assertGreaterEqual(ball.speed, self.config.ball_initial_speed)
+
     def test_particle_system_lifecycle(self):
         ps = ParticleSystem(max_particles=50)
         ps.emit(100, 100, (255, 255, 255), count=20)
@@ -78,3 +97,4 @@ class TestPhysicsAndEntities(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

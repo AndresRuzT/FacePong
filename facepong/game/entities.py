@@ -70,7 +70,7 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_time: float = 0.045, smooth_factor: Optional[float] = None) -> None:
+    def update(self, dt: float, smooth_time: float = 0.028, smooth_factor: Optional[float] = None) -> None:
         """
         Critically damped spring interpolation (SmoothDamp) towards target coordinate.
         Bridges 30 FPS camera updates to silky 60 FPS display refresh with zero jumps.
@@ -134,7 +134,8 @@ class Ball:
         self.y = float(self.arena_rect.centery)
         self.vx = 0.0
         self.vy = 0.0
-        self.speed = config.ball_initial_speed
+        self.speed = getattr(config, "ball_serve_speed", config.ball_initial_speed)
+        self.is_serve_in_flight: bool = True
 
         self.trail: Deque[Tuple[float, float]] = deque(maxlen=10)
         self.trail_timer = 0.0
@@ -144,14 +145,19 @@ class Ball:
         self.arena_rect = arena_rect
 
     def serve(self, direction_to_player: bool = True) -> None:
-        """Resets the ball to arena center and launches with randomized angle."""
+        """
+        Resets the ball to arena center and launches gently directed towards the center
+        so the player can comfortably read and intercept the serve from the zero baseline.
+        """
         self.x = float(self.arena_rect.centerx)
         self.y = float(self.arena_rect.centery)
-        self.speed = self.config.ball_initial_speed
+        self.speed = getattr(self.config, "ball_serve_speed", 340.0)
+        self.is_serve_in_flight = True
         self.trail.clear()
 
-        # Launch angle between -35 and +35 degrees
-        angle_deg = random.uniform(-35.0, 35.0)
+        # Launch straight towards center with minimal variance (-4.0 to +4.0 degrees)
+        # to ensure it directly targets the reset paddle at center
+        angle_deg = random.uniform(-4.0, 4.0)
         angle_rad = math.radians(angle_deg)
 
         dir_x = -1.0 if direction_to_player else 1.0
@@ -219,8 +225,13 @@ class Ball:
         max_angle = math.radians(self.config.max_bounce_angle_deg)
         bounce_angle = offset * max_angle
 
-        # Accelerate ball slightly per hit
-        self.speed = min(self.config.ball_max_speed, self.speed + self.config.ball_speed_step)
+        # If this was the initial serve in flight, ramp up to full rally speed immediately
+        if getattr(self, "is_serve_in_flight", False):
+            self.is_serve_in_flight = False
+            self.speed = max(self.config.ball_initial_speed, self.speed + 150.0)
+        else:
+            # Accelerate ball slightly per hit
+            self.speed = min(self.config.ball_max_speed, self.speed + self.config.ball_speed_step)
 
         direction_x = 1.0 if is_player else -1.0
         self.vx = direction_x * self.speed * math.cos(bounce_angle)
