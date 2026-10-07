@@ -17,7 +17,8 @@ class AdaptiveAIController:
         self.screen_height = screen_height
 
         # Dynamic difficulty state [0.0 = easiest, 1.0 = unbeatable master]
-        self.difficulty_level: float = 0.5
+        # Welcoming initial baseline (0.35) makes the game fair and beatable from the start
+        self.difficulty_level: float = 0.35
         self.current_speed: float = ai_config.base_speed
 
         # Prediction and reaction delay state
@@ -25,18 +26,20 @@ class AdaptiveAIController:
         self._time_since_last_reaction: float = 0.0
         self._intentional_error: float = 0.0
         self._last_trajectory_predicted: float = screen_height / 2.0
+        self._last_ball_vx: float = 0.0
 
     def adjust_difficulty(self, player_score: int, ai_score: int, rally_count: int = 0) -> None:
         """
         Dynamically adjusts difficulty based on score differential.
-        Ensures matches remain competitive and rubber-banded.
+        Ensures matches remain accessible, fun, and winnable for the player.
         """
         score_diff = player_score - ai_score  # Positive: player winning; Negative: AI winning
 
-        # Map score differential (-3 to +3) into difficulty range [0.15, 0.95]
-        # Base balanced difficulty is 0.50
-        target_diff = 0.50 + (score_diff * 0.12) + (min(rally_count, 10) * 0.01)
-        target_diff = max(0.15, min(0.95, target_diff))
+        # Welcoming base difficulty (0.35):
+        # When player is behind, difficulty drops down to ~0.12 (slower AI, larger errors),
+        # offering great scoring opportunities. When player is ahead, AI steps up gracefully.
+        target_diff = 0.35 + (score_diff * 0.12) + (min(rally_count, 8) * 0.012)
+        target_diff = max(0.12, min(0.70, target_diff))
 
         # Smooth difficulty transition
         self.difficulty_level = 0.8 * self.difficulty_level + 0.2 * target_diff
@@ -81,14 +84,26 @@ class AdaptiveAIController:
             # Traveling upwards on odd bounce cycle
             predicted_y = bottom_boundary - remainder
 
+        # Bank shot human uncertainty:
+        # Each wall bounce introduces realistic estimation variance, rewarding player for trick angles
+        if cycles >= 1:
+            uncertainty = min(2, cycles) * 35.0 * (1.0 - self.difficulty_level)
+            predicted_y += random.uniform(-uncertainty, uncertainty)
+
         return max(top_boundary, min(bottom_boundary, predicted_y))
 
     def update(self, dt: float, ball: Ball, ai_paddle: Paddle, player_score: int, ai_score: int, rally_count: int = 0) -> None:
         """Updates AI reaction calculation and moves the AI paddle."""
         self.adjust_difficulty(player_score, ai_score, rally_count)
 
+        # If ball just reversed direction towards AI (player hit ball), reset reaction timer
+        # to guarantee genuine human visual reaction latency to the player's shot
+        if ball.vx > 0 and self._last_ball_vx <= 0:
+            self._time_since_last_reaction = 0.0
+        self._last_ball_vx = ball.vx
+
         self._time_since_last_reaction += dt
-        reaction_threshold = self.config.reaction_interval_sec * (1.6 - self.difficulty_level * 0.8)
+        reaction_threshold = self.config.reaction_interval_sec * (1.5 - self.difficulty_level * 0.7)
 
         # Update prediction periodically to simulate human latency
         if self._time_since_last_reaction >= reaction_threshold:
@@ -99,11 +114,8 @@ class AdaptiveAIController:
             self._last_trajectory_predicted = raw_target_y
 
             # Introduce intentional human-like error inversely proportional to difficulty
-            error_magnitude = (1.0 - self.difficulty_level) * self.config.max_error_offset
-            # If difficulty is high, error is negligible
-            if self.difficulty_level > 0.8:
-                error_magnitude = self.config.min_error_offset
-
+            # When difficulty is low-to-moderate, error comfortably exceeds 55px paddle half-height
+            error_magnitude = max(self.config.min_error_offset, (1.0 - self.difficulty_level) * self.config.max_error_offset)
             self._intentional_error = random.uniform(-error_magnitude, error_magnitude)
             self._target_y = raw_target_y + self._intentional_error
 
