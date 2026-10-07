@@ -283,6 +283,7 @@ class GameEngine:
         if self._calibration_progress >= 1.0 or tracking_state.is_calibrated:
             self.vision.finish_calibration()
             self.state_mgr.start_new_match()
+            self.renderer.reset_match_effects()
             center_y = float(self.arena_rect.centery)
             self.player_paddle.reset_to_center(center_y)
             self.ai_paddle.reset_to_center(center_y)
@@ -326,7 +327,9 @@ class GameEngine:
             self.particles.emit(self.arena_rect.left + 5, self.ball.y, self.config.colors.ai_primary, count=35, speed_range=(150.0, 450.0))
             is_game_over = self.state_mgr.record_goal("AI")
             self.sound.play("opponent_goal")
+            self.renderer.trigger_goal_effect("AI")
             if is_game_over:
+                self.renderer.trigger_match_end("AI")
                 self.state_mgr.change_state(ExhibitionState.GAME_OVER)
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
@@ -347,7 +350,9 @@ class GameEngine:
             )
             is_game_over = self.state_mgr.record_goal("PLAYER")
             self.sound.play("goal")
+            self.renderer.trigger_goal_effect("PLAYER")
             if is_game_over:
+                self.renderer.trigger_match_end("PLAYER")
                 self.state_mgr.change_state(ExhibitionState.GAME_OVER)
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
@@ -385,6 +390,9 @@ class GameEngine:
 
         # 2. Outer glowing arena bezel & field dividers
         self.renderer.render_arena_frame(time_sec=now)
+
+        # 2b. Lightweight screen effects (Goal flash/shake, Victory/Defeat visuals)
+        self.renderer.render_screen_effects(time_sec=now, dt=dt)
 
         # 3. Exterior Top Header Bar (HUD & Camera PIP completely outside the arena)
         tracking_state = self.vision.get_state()
@@ -429,6 +437,10 @@ class GameEngine:
                 self._render_debug_overlay()
 
         elif state == ExhibitionState.GAME_OVER:
+            if self.state_mgr.winner == "PLAYER" and random.random() < 0.22:
+                # Celebratory golden victory fireworks fountains
+                fx_x = random.choice([self.arena_rect.left + 35, self.arena_rect.right - 35, self.arena_rect.centerx])
+                self.particles.emit(fx_x, self.arena_rect.bottom - 12, (255, 215, 30), count=6, speed_range=(100.0, 300.0))
             self.renderer.render_particles(self.particles)
             self.screens.draw_game_over_screen(self.state_mgr, tracking_state)
 

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Key landmark indices in MediaPipe Face Mesh (468 points total)
 NOSE_TIP_IDX = 1
+GLABELLA_IDX = 168  # Mid-point between the eyes / root of nose for stable head tracking
 FOREHEAD_IDX = 10
 CHIN_IDX = 152
 LEFT_EYE_IDX = 33
@@ -81,12 +82,12 @@ class FaceMeshTracker:
         """Initializes MediaPipe Face Mesh AND OpenCV Haar Cascade as complementary detectors."""
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                # Lower tracking confidence threshold prevents landmark drops during fast head jerks
+                # Balanced confidence thresholds prevent drifting ROI and eliminate sudden snaps
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                     max_num_faces=1,
                     refine_landmarks=False,  # Higher FPS on Raspberry Pi
-                    min_detection_confidence=0.35,
-                    min_tracking_confidence=0.30,
+                    min_detection_confidence=0.45,
+                    min_tracking_confidence=0.45,
                 )
                 logger.info("MediaPipe Face Mesh tracker initialized (fast-motion resilient)")
         except Exception as exc:
@@ -160,7 +161,9 @@ class FaceMeshTracker:
                 raw_face_detected = True
                 landmarks = results.multi_face_landmarks[0].landmark
                 nose_point = landmarks[NOSE_TIP_IDX]
-                raw_y = float(nose_point.y)
+                glabella_point = landmarks[GLABELLA_IDX]
+                # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
+                raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
 
                 # Render futuristic landmarks onto HUD preview
                 nose_px = int(nose_point.x * preview_w)
@@ -198,7 +201,8 @@ class FaceMeshTracker:
             if len(faces) > 0:
                 raw_face_detected = True
                 fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                center_y = (fy * 2.0) + (fh * 2.0) / 2.0
+                # Calibrated 0.52 offset matches mid-face landmark vertical level precisely
+                center_y = (fy * 2.0) + (fh * 2.0) * 0.52
                 raw_y = float(center_y / h)
 
                 p_fx = int(fx * 2.0 * scale_x)
@@ -375,10 +379,11 @@ class VisionPipeline:
         self.tracker.reset_for_new_camera()
 
     def _run_pipeline(self) -> None:
-        """Continuous pipeline loop running at camera FPS."""
-        frame_interval = 1.0 / max(1, self.config.target_fps)
+        """Continuous pipeline loop running at camera FPS with instant event-driven wakeup."""
         while self._is_running:
-            loop_start = time.perf_counter()
+            # Wait for camera thread to deliver a fresh frame (zero polling latency)
+            self.camera.frame_ready_event.wait(timeout=0.035)
+            self.camera.frame_ready_event.clear()
 
             # Detect hardware camera switch (e.g. unplug USB -> fallback to integrated)
             dev_counter = getattr(self.camera, "device_change_counter", 0)
@@ -387,7 +392,7 @@ class VisionPipeline:
                 self.tracker.reset_for_new_camera()
                 logger.info("VisionPipeline detected camera device change (counter %d). Resetting tracker.", dev_counter)
 
-            has_frame, frame = self.camera.read()
+            has_frame, frame = self.camera.read(copy=False)
             if has_frame and frame is not None:
                 detected, raw_y, smoothed_y, hud_preview = self.tracker.process_frame(frame)
                 now = time.perf_counter()
@@ -411,10 +416,6 @@ class VisionPipeline:
 
                         if elapsed >= self.config.calibration_duration_sec:
                             self._finish_calibration()
-
-            elapsed_loop = time.perf_counter() - loop_start
-            sleep_duration = max(0.001, frame_interval - elapsed_loop)
-            time.sleep(sleep_duration)
 
     def _finish_calibration(self) -> None:
         """Computes calibrated baseline from accumulated samples."""

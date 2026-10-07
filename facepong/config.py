@@ -90,9 +90,9 @@ class ColorPalette:
     ai_primary: Tuple[int, int, int] = (255, 45, 120)
     ai_glow: Tuple[int, int, int] = (180, 20, 80)
     
-    # Ball & Accents
-    ball_core: Tuple[int, int, int] = (255, 255, 255)
-    ball_glow: Tuple[int, int, int] = (0, 255, 180)
+    # Ball & Accents (Fluorescent Green / Electric Lime)
+    ball_core: Tuple[int, int, int] = (225, 255, 120)
+    ball_glow: Tuple[int, int, int] = (50, 255, 20)
     amber_accent: Tuple[int, int, int] = (255, 190, 40)
     
     # UI Elements

@@ -178,6 +178,8 @@ class ThreadedCamera:
         self._consecutive_failures = 0
         self._last_reconnect_attempt = 0.0
         self._last_usb_check = 0.0
+        # Instant frame notification event for zero-latency pipeline wakeups
+        self.frame_ready_event = threading.Event()
 
     def _open_device(self, idx: int) -> bool:
         """Attempts to open and configure a specific video device index."""
@@ -302,6 +304,7 @@ class ThreadedCamera:
                     self._consecutive_failures = 0
                     with self._lock:
                         self._latest_frame = frame
+                    self.frame_ready_event.set()
 
                     # Periodically check if preferred USB camera was plugged in
                     if not self.is_external_usb and (now - self._last_usb_check > 2.0):
@@ -316,6 +319,7 @@ class ThreadedCamera:
                 synth = self._generate_synthetic_frame()
                 with self._lock:
                     self._latest_frame = synth
+                self.frame_ready_event.set()
 
                 # Attempt reconnect every 1.5 seconds
                 if now - self._last_reconnect_attempt > 1.5:
@@ -342,11 +346,11 @@ class ThreadedCamera:
         )
         return frame
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read(self, copy: bool = False) -> Tuple[bool, Optional[np.ndarray]]:
         """Returns the freshest captured frame in a thread-safe manner."""
         with self._lock:
             if self._latest_frame is not None:
-                return True, self._latest_frame.copy()
+                return True, (self._latest_frame.copy() if copy else self._latest_frame)
         return False, None
 
     @property

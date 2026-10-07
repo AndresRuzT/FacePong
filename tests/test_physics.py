@@ -94,6 +94,45 @@ class TestPhysicsAndEntities(unittest.TestCase):
         ps.update(1.0)
         self.assertEqual(len(ps.particles), 0)
 
+    def test_neon_ball_fluorescent_colors(self):
+        from facepong.config import ColorPalette
+        colors = ColorPalette()
+        # Ensure ball glow is dominant fluorescent green (G significantly higher than B)
+        self.assertGreater(colors.ball_glow[1], colors.ball_glow[2] * 2)
+        # Ensure ball glow is distinct from player cyan
+        self.assertNotEqual(colors.ball_glow, colors.player_primary)
+
+    def test_screen_effects_state_and_lifecycle(self):
+        from facepong.config import GameConfig
+        from facepong.ui.renderer import NeonRenderer
+        screen = pygame.Surface((1280, 720))
+        cfg = GameConfig()
+        renderer = NeonRenderer(screen, cfg)
+
+        # Test player goal trigger
+        renderer.trigger_goal_effect("PLAYER")
+        self.assertEqual(renderer.active_screen_effect, "player_goal")
+        self.assertGreater(renderer.effect_timer, 0.0)
+
+        # Test AI goal trigger (activates shake)
+        renderer.trigger_goal_effect("AI")
+        self.assertEqual(renderer.active_screen_effect, "ai_goal")
+        self.assertGreater(renderer.shake_timer, 0.0)
+
+        # Run render_screen_effects step
+        renderer.render_screen_effects(time_sec=1.0, dt=0.016)
+        self.assertIsNotNone(renderer.shake_offset)
+
+        # Test match end trigger
+        renderer.trigger_match_end("PLAYER")
+        self.assertEqual(renderer.match_result, "player_win")
+
+        # Test reset
+        renderer.reset_match_effects()
+        self.assertIsNone(renderer.active_screen_effect)
+        self.assertIsNone(renderer.match_result)
+        self.assertEqual(renderer.shake_offset, (0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

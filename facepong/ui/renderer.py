@@ -77,6 +77,14 @@ class NeonRenderer:
         # Pre-rendered surface cache to eliminate dynamic allocations at 60 FPS on Raspberry Pi
         self._init_surface_cache()
 
+        # Lightweight screen effects state for Raspberry Pi
+        self.active_screen_effect: Optional[str] = None
+        self.effect_timer: float = 0.0
+        self.effect_duration: float = 0.0
+        self.shake_offset: Tuple[int, int] = (0, 0)
+        self.shake_timer: float = 0.0
+        self.match_result: Optional[str] = None
+
     def _init_surface_cache(self) -> None:
         """Precomputes neon bloom surfaces to maintain rock-solid 60 FPS on Raspberry Pi."""
         pw = self.config.physics.paddle_width + 8
@@ -180,6 +188,99 @@ class NeonRenderer:
                 2,
             )
             y += dash_len + gap_len
+
+    def trigger_goal_effect(self, scorer: str) -> None:
+        """Triggers dynamic goal feedback (cyan rush for player, crimson alert for AI)."""
+        if scorer == "PLAYER":
+            self.active_screen_effect = "player_goal"
+            self.effect_timer = 0.45
+            self.effect_duration = 0.45
+        else:
+            self.active_screen_effect = "ai_goal"
+            self.effect_timer = 0.35
+            self.effect_duration = 0.35
+            self.shake_timer = 0.25
+
+    def trigger_match_end(self, winner: str) -> None:
+        """Activates match conclusion visuals (gold victory or red cyber-glitch defeat)."""
+        self.match_result = "player_win" if winner == "PLAYER" else "ai_win"
+
+    def reset_match_effects(self) -> None:
+        """Resets visual event states for a new match."""
+        self.active_screen_effect = None
+        self.effect_timer = 0.0
+        self.shake_offset = (0, 0)
+        self.shake_timer = 0.0
+        self.match_result = None
+
+    def render_screen_effects(self, time_sec: float = 0.0, dt: float = 0.016) -> None:
+        """Draws lightweight screen flash/shake effects without alpha surface allocations."""
+        # 1. Screen shake physics
+        if self.shake_timer > 0.0:
+            self.shake_timer = max(0.0, self.shake_timer - dt)
+            ratio = self.shake_timer / 0.25
+            mag = max(1, int(4.0 * ratio))
+            self.shake_offset = (random.randint(-mag, mag), random.randint(-mag, mag))
+        else:
+            self.shake_offset = (0, 0)
+
+        # 2. Goal scoring transient visual effects
+        if self.active_screen_effect is not None and self.effect_timer > 0.0:
+            self.effect_timer = max(0.0, self.effect_timer - dt)
+            prog = self.effect_timer / max(0.01, self.effect_duration)
+
+            if self.active_screen_effect == "player_goal":
+                # Neon Cyan expanding pulse ring around arena
+                expand = int((1.0 - prog) * 20.0)
+                pulse_rect = self.arena_rect.inflate(expand * 2, expand * 2)
+                glow_col = (0, int(240 * prog), int(255 * prog))
+                pygame.draw.rect(self.screen, glow_col, pulse_rect, width=max(1, int(3 * prog) + 1), border_radius=10)
+
+                # Cyber shockwave streak across the arena towards AI
+                sweep_x = self.arena_rect.left + int((1.0 - prog) * self.arena_rect.width)
+                if sweep_x < self.arena_rect.right:
+                    pygame.draw.line(self.screen, (0, 255, 200), (sweep_x, self.arena_rect.top), (sweep_x, self.arena_rect.bottom), 2)
+
+            elif self.active_screen_effect == "ai_goal":
+                # Danger Red glitch strobe on the arena border
+                if int(time_sec * 30.0) % 2 == 0:
+                    danger_col = (int(255 * prog), int(40 * prog), int(40 * prog))
+                    pygame.draw.rect(self.screen, danger_col, self.arena_rect, width=3, border_radius=8)
+                    # Hazard indicator on player's side
+                    pl_x = self.arena_rect.left + 8
+                    pygame.draw.line(self.screen, danger_col, (pl_x, self.arena_rect.top + 8), (pl_x, self.arena_rect.bottom - 8), 3)
+
+        # 3. Match outcome sustained visual effects (Victory vs Defeat)
+        if self.match_result == "player_win":
+            # Victory: Pulsing Golden Aurora Bezel
+            pulse = 0.5 + 0.5 * math.sin(time_sec * 6.0)
+            gold_col = (int(255 * (0.8 + 0.2 * pulse)), int(215 * (0.7 + 0.3 * pulse)), int(30 + 70 * pulse))
+            glow_rect = self.arena_rect.inflate(int(8 + 6 * pulse), int(8 + 6 * pulse))
+            pygame.draw.rect(self.screen, gold_col, glow_rect, width=2, border_radius=10)
+            pygame.draw.rect(self.screen, (255, 240, 140), self.arena_rect, width=2, border_radius=8)
+
+            # Golden corner champion brackets
+            for cx, cy in [
+                (self.arena_rect.left, self.arena_rect.top),
+                (self.arena_rect.right, self.arena_rect.top),
+                (self.arena_rect.left, self.arena_rect.bottom),
+                (self.arena_rect.right, self.arena_rect.bottom),
+            ]:
+                dx = 24 if cx == self.arena_rect.left else -24
+                dy = 24 if cy == self.arena_rect.top else -24
+                pygame.draw.line(self.screen, gold_col, (cx, cy), (cx + dx, cy), 3)
+                pygame.draw.line(self.screen, gold_col, (cx, cy), (cx, cy + dy), 3)
+
+        elif self.match_result == "ai_win":
+            # Defeat: Red Cyber-Glitch Bezel and subtle scanlines
+            pulse = 0.5 + 0.5 * math.sin(time_sec * 7.5)
+            red_col = (int(180 + 75 * pulse), 30, int(50 + 40 * pulse))
+            pygame.draw.rect(self.screen, red_col, self.arena_rect, width=2, border_radius=8)
+
+            # Intermittent scanline glitch bar
+            if int(time_sec * 10.0) % 3 == 0:
+                glitch_y = self.arena_rect.top + int((time_sec * 160.0) % max(1, self.arena_rect.height))
+                pygame.draw.line(self.screen, (255, 45, 60), (self.arena_rect.left + 10, glitch_y), (self.arena_rect.right - 10, glitch_y), 1)
 
     def render_exterior_header(
         self,
