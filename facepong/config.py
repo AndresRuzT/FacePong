@@ -57,16 +57,16 @@ class PhysicsConfig:
 
 @dataclass(frozen=True)
 class AIConfig:
-    # Base movement speed of the AI paddle (gentler, human-like arcade speed)
-    base_speed: float = 340.0
+    # Base movement speed of the AI paddle (responsive arcade speed)
+    base_speed: float = 400.0
     # Dynamic speed boundaries based on score difference
-    min_speed: float = 230.0
-    max_speed: float = 460.0
-    # Error margin in pixels introduced to the predicted target (allows player to score on angled shots)
-    max_error_offset: float = 160.0
-    min_error_offset: float = 30.0
+    min_speed: float = 280.0
+    max_speed: float = 540.0
+    # Error margin in pixels introduced to the predicted target (scales with shot difficulty)
+    max_error_offset: float = 95.0
+    min_error_offset: float = 12.0
     # Prediction update interval (simulates human visual reaction latency)
-    reaction_interval_sec: float = 0.24
+    reaction_interval_sec: float = 0.16
 
 
 @dataclass(frozen=True)

@@ -35,11 +35,12 @@ class AdaptiveAIController:
         """
         score_diff = player_score - ai_score  # Positive: player winning; Negative: AI winning
 
-        # Welcoming base difficulty (0.35):
-        # When player is behind, difficulty drops down to ~0.12 (slower AI, larger errors),
-        # offering great scoring opportunities. When player is ahead, AI steps up gracefully.
-        target_diff = 0.35 + (score_diff * 0.12) + (min(rally_count, 8) * 0.012)
-        target_diff = max(0.12, min(0.70, target_diff))
+        # Balanced baseline difficulty (0.42):
+        # When player is behind, difficulty drops gracefully down to ~0.20,
+        # still defending easy serves but vulnerable to angled/fast shots.
+        # When player is ahead, AI steps up progressively.
+        target_diff = 0.42 + (score_diff * 0.10) + (min(rally_count, 6) * 0.015)
+        target_diff = max(0.20, min(0.75, target_diff))
 
         # Smooth difficulty transition
         self.difficulty_level = 0.8 * self.difficulty_level + 0.2 * target_diff
@@ -113,10 +114,26 @@ class AdaptiveAIController:
             raw_target_y = self.predict_ball_trajectory(ball, ai_paddle_target_x)
             self._last_trajectory_predicted = raw_target_y
 
-            # Introduce intentional human-like error inversely proportional to difficulty
-            # When difficulty is low-to-moderate, error comfortably exceeds 55px paddle half-height
-            error_magnitude = max(self.config.min_error_offset, (1.0 - self.difficulty_level) * self.config.max_error_offset)
-            self._intentional_error = random.uniform(-error_magnitude, error_magnitude)
+            # Error margin scales dynamically with shot difficulty:
+            # - Gentle/center serves (travel_dist < 60px, low speed, 0 bounces): error is minimal (<=14px),
+            #   preventing the AI from clumsily giving away easy serve points.
+            # - Hard drives, fast smashes, or trick bank shots: error increases up to max_error_offset (>=65px),
+            #   which exceeds the paddle half-height (55px), allowing skilled player shots to score!
+            dx_to_ai = max(1.0, ai_paddle_target_x - ball.x)
+            time_to_reach = dx_to_ai / max(1.0, abs(ball.vx)) if ball.vx > 0 else 1.0
+            total_y_dist = abs(ball.vy * time_to_reach)
+            
+            # Difficulty factor [0.0 = trivial straight serve, 1.0 = sharp difficult shot]
+            shot_difficulty = min(1.0, (total_y_dist / 320.0) * 0.7 + (abs(ball.vy) / 380.0) * 0.3)
+            
+            # Base error bound based on current dynamic difficulty
+            max_possible_error = max(self.config.min_error_offset, (1.0 - self.difficulty_level) * self.config.max_error_offset)
+            
+            # On easy straight serves, AI never deliberately mispredicts by more than 14px
+            effective_error_magnitude = 14.0 + (max_possible_error - 14.0) * shot_difficulty
+            effective_error_magnitude = max(self.config.min_error_offset, effective_error_magnitude)
+            
+            self._intentional_error = random.uniform(-effective_error_magnitude, effective_error_magnitude)
             self._target_y = raw_target_y + self._intentional_error
 
         # Steer paddle towards target coordinate with clamped speed
