@@ -68,13 +68,34 @@ def probe_available_cameras(exclude_index: Optional[int] = None) -> List[Tuple[i
                 except Exception:
                     pass
 
+                # Filter out non-capture V4L2 devices (e.g. Raspberry Pi ISP, H264 decoders, metadata)
+                index_file = os.path.join(dev_path, "index")
+                if os.path.exists(index_file):
+                    try:
+                        with open(index_file, "r") as f:
+                            # Sub-streams or secondary outputs typically have index > 0
+                            dev_subindex = int(f.read().strip())
+                    except Exception:
+                        dev_subindex = 0
+                else:
+                    dev_subindex = 0
+
+                # Check if device is a real video capture device
+                # On Raspberry Pi, bcm2835-codec, bcm2835-isp, rpi-unicam create non-capture nodes
+                is_rpi_internal_subsystem = any(
+                    k in name.lower()
+                    for k in ("bcm2835", "unicam", "isp", "codec", "pisp")
+                )
+                if is_rpi_internal_subsystem and dev_subindex > 0:
+                    continue
+
                 is_internal = any(
                     k in name.lower()
                     for k in ("integrated", "internal", "built-in", "builtin", "front camera")
                 )
                 is_usb = ("usb" in device_link.lower()) and not is_internal
 
-                # Verify actual frame acquisition capability
+                # On Raspberry Pi, only attempt open_video_capture if device is USB or confirmed capture
                 cap = open_video_capture(idx)
                 can_read = False
                 if cap is not None:
