@@ -48,7 +48,12 @@ class ScreenManager:
         title_surf = self.renderer.font_title.render(title_text, True, self.colors.player_primary)
         self.screen.blit(title_surf, title_surf.get_rect(center=(center_x, title_y)))
 
-        # 2. Main Arcade Call-To-Action (Pulsing "INSERT COIN" / "LOOK AT CAMERA")
+        # 2. Main Arcade Call-To-Action (Pulsing bilingual prompt)
+        # Smoothly alternates between Spanish and English every 3.5 seconds
+        period = 3.5
+        cycle = (now / period) % 2.0
+        is_spanish = cycle < 1.0
+
         pulse = 0.5 + 0.5 * math.sin(now * 4.5)
         pulse_alpha = int(140 + 115 * pulse)
         callout_color = (
@@ -57,12 +62,12 @@ class ScreenManager:
             int(self.colors.amber_accent[2] * (pulse_alpha / 255.0)),
         )
 
-        prompt_str = "►  MIRA A LA CÁMARA PARA JUGAR  ◄"
+        prompt_str = "►  MIRA A LA CÁMARA PARA JUGAR  ◄" if is_spanish else "►  LOOK AT THE CAMERA TO PLAY  ◄"
         prompt_surf = self.renderer.font_banner.render(prompt_str, True, callout_color)
         self.screen.blit(prompt_surf, prompt_surf.get_rect(center=(center_x, center_y + 25)))
 
         # 3. Minimal Subtle Secondary Prompt (Keyboard alternative)
-        kb_str = "[ O PRESIONA ESPACIO PARA INICIAR ]"
+        kb_str = "[ O PRESIONA ESPACIO PARA INICIAR ]" if is_spanish else "[ OR PRESS SPACE TO START ]"
         kb_surf = self.renderer.font_hud.render(kb_str, True, self.colors.text_muted)
         self.screen.blit(kb_surf, kb_surf.get_rect(center=(center_x, center_y + 68)))
 
