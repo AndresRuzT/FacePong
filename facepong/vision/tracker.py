@@ -82,12 +82,12 @@ class FaceMeshTracker:
         """Initializes MediaPipe Face Mesh AND OpenCV Haar Cascade as complementary detectors."""
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                # Balanced confidence thresholds prevent drifting ROI and eliminate sudden snaps
+                # Lower detection threshold to 0.35 allows robust recognition at greater distances and varied lighting on Raspberry Pi
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                     max_num_faces=1,
                     refine_landmarks=False,  # Higher FPS on Raspberry Pi
-                    min_detection_confidence=0.45,
-                    min_tracking_confidence=0.45,
+                    min_detection_confidence=0.35,
+                    min_tracking_confidence=0.35,
                 )
                 logger.info("MediaPipe Face Mesh tracker initialized (fast-motion resilient)")
         except Exception as exc:
@@ -153,15 +153,16 @@ class FaceMeshTracker:
         scale_y = preview_h / float(h)
 
         if self._face_mesh is not None:
-            # Set writeable=False to allow MediaPipe to pass frame by reference without memory copy
-            rgb_frame.flags.writeable = False
-            results = self._face_mesh.process(rgb_frame)
-            rgb_frame.flags.writeable = True
-            if results.multi_face_landmarks:
-                raw_face_detected = True
-                landmarks = results.multi_face_landmarks[0].landmark
-                nose_point = landmarks[NOSE_TIP_IDX]
-                glabella_point = landmarks[GLABELLA_IDX]
+            try:
+                # Set writeable=False to allow MediaPipe to pass frame by reference without memory copy
+                rgb_frame.flags.writeable = False
+                results = self._face_mesh.process(rgb_frame)
+                rgb_frame.flags.writeable = True
+                if results and results.multi_face_landmarks:
+                    raw_face_detected = True
+                    landmarks = results.multi_face_landmarks[0].landmark
+                    nose_point = landmarks[NOSE_TIP_IDX]
+                    glabella_point = landmarks[GLABELLA_IDX]
                 # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
                 raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
 
@@ -191,6 +192,8 @@ class FaceMeshTracker:
                     1,
                     cv2.LINE_AA,
                 )
+            except Exception as exc:
+                logger.debug("MediaPipe Face Mesh process exception: %s", exc)
 
         # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur during sudden head flick)
         if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
