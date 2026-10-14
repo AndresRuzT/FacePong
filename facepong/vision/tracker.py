@@ -59,8 +59,8 @@ class FaceMeshTracker:
 
         # Sensitivity-aware calibration bounds
         sensitivity = max(0.5, getattr(config, "head_sensitivity", 2.4))
-        base_spread = getattr(config, "default_range_spread", 0.14)
-        initial_spread = base_spread / sensitivity
+        base_spread = getattr(config, "default_range_spread", 0.18)
+        initial_spread = base_spread / (sensitivity ** 0.6)
         self._min_y_bound: float = max(0.02, 0.5 - initial_spread)
         self._max_y_bound: float = min(0.98, 0.5 + initial_spread)
         self._calibration_samples: List[float] = []
@@ -73,6 +73,10 @@ class FaceMeshTracker:
         self._last_valid_detection_time: float = 0.0
         self._velocity_y: float = 0.0
         self._last_raw_y_sample_time: float = 0.0
+
+        # Haar Cascade bounding box smoothing and ROI tracking state
+        self._cascade_box: Optional[Tuple[float, float, float, float]] = None
+        self._cascade_miss_count: int = 0
 
         # Detectors
         self._face_mesh = None
@@ -126,8 +130,8 @@ class FaceMeshTracker:
         """Sets comfortable dynamic range around player's neutral head position based on sensitivity."""
         if range_spread is None:
             sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
-            base_spread = getattr(self.config, "default_range_spread", 0.14)
-            range_spread = base_spread / sensitivity
+            base_spread = getattr(self.config, "default_range_spread", 0.18)
+            range_spread = base_spread / (sensitivity ** 0.6)
         self._min_y_bound = max(0.02, neutral_y - range_spread)
         self._max_y_bound = min(0.98, neutral_y + range_spread)
         logger.info(
@@ -207,7 +211,7 @@ class FaceMeshTracker:
         # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur or platforms without mp.solutions)
         if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # Downscale only if frame width > 360 to prevent over-shrinking small kiosk faces
+            # Downscale only if frame width > 360 to keep speed high while preserving face detail
             if w > 360:
                 scale_factor = 320.0 / float(w)
                 detect_img = cv2.resize(gray, (0, 0), fx=scale_factor, fy=scale_factor)
@@ -216,23 +220,79 @@ class FaceMeshTracker:
                 detect_img = gray
                 inv_scale = 1.0
 
-            # Equalize histogram to handle harsh indoor lighting / camera exposure variations
-            detect_img = cv2.equalizeHist(detect_img)
+            det_h, det_w = detect_img.shape[:2]
+            faces = []
+            roi_offset_x = 0
+            roi_offset_y = 0
 
-            faces = self._cascade.detectMultiScale(
-                detect_img,
-                scaleFactor=1.1,
-                minNeighbors=3,
-                minSize=(20, 20),
-            )
+            # 1. ROI Fast Path: If face was tracked recently, search local ROI first (3x-5x faster on Raspberry Pi)
+            if self._cascade_box is not None and self._cascade_miss_count < 4:
+                cb_x, cb_y, cb_w, cb_h = self._cascade_box
+                d_x = cb_x / inv_scale
+                d_y = cb_y / inv_scale
+                d_w = cb_w / inv_scale
+                d_h = cb_h / inv_scale
+
+                pad_w = int(d_w * 0.45)
+                pad_h = int(d_h * 0.45)
+                rx1 = max(0, int(d_x - pad_w))
+                ry1 = max(0, int(d_y - pad_h))
+                rx2 = min(det_w, int(d_x + d_w + pad_w))
+                ry2 = min(det_h, int(d_y + d_h + pad_h))
+
+                roi_img = detect_img[ry1:ry2, rx1:rx2]
+                if roi_img.shape[0] >= 32 and roi_img.shape[1] >= 32:
+                    roi_eq = cv2.equalizeHist(roi_img)
+                    roi_faces = self._cascade.detectMultiScale(
+                        roi_eq,
+                        scaleFactor=1.1,
+                        minNeighbors=4,
+                        minSize=(28, 28),
+                    )
+                    if len(roi_faces) > 0:
+                        faces = roi_faces
+                        roi_offset_x = rx1
+                        roi_offset_y = ry1
+
+            # 2. Full Frame Scan: if ROI did not find a face, scan full frame to acquire / re-acquire
+            if len(faces) == 0:
+                detect_eq = cv2.equalizeHist(detect_img)
+                faces = self._cascade.detectMultiScale(
+                    detect_eq,
+                    scaleFactor=1.1,
+                    minNeighbors=4,
+                    minSize=(36, 36),
+                )
+                roi_offset_x = 0
+                roi_offset_y = 0
+
             if len(faces) > 0:
                 raw_face_detected = True
-                fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                # Restore original frame coordinates
-                orig_fx = fx * inv_scale
-                orig_fy = fy * inv_scale
-                orig_fw = fw * inv_scale
-                orig_fh = fh * inv_scale
+                self._cascade_miss_count = 0
+                r_fx, r_fy, r_fw, r_fh = max(faces, key=lambda b: b[2] * b[3])
+                # Convert back to full frame coordinates
+                det_fx = (r_fx + roi_offset_x) * inv_scale
+                det_fy = (r_fy + roi_offset_y) * inv_scale
+                det_fw = r_fw * inv_scale
+                det_fh = r_fh * inv_scale
+
+                # Temporal smoothing on bounding box: removes discrete pixel quantization jitter
+                if self._cascade_box is None:
+                    self._cascade_box = (det_fx, det_fy, det_fw, det_fh)
+                else:
+                    s_x, s_y, s_w, s_h = self._cascade_box
+                    if abs(det_fy - s_y) < s_h * 0.8:
+                        box_alpha = 0.35  # Smooth filter prevents jitter while maintaining fast response
+                        self._cascade_box = (
+                            s_x * (1.0 - box_alpha) + det_fx * box_alpha,
+                            s_y * (1.0 - box_alpha) + det_fy * box_alpha,
+                            s_w * (1.0 - box_alpha) + det_fw * box_alpha,
+                            s_h * (1.0 - box_alpha) + det_fh * box_alpha,
+                        )
+                    else:
+                        self._cascade_box = (det_fx, det_fy, det_fw, det_fh)
+
+                orig_fx, orig_fy, orig_fw, orig_fh = self._cascade_box
 
                 # Calibrated 0.52 offset matches mid-face landmark vertical level precisely
                 center_y = orig_fy + orig_fh * 0.52
@@ -257,6 +317,8 @@ class FaceMeshTracker:
                     1,
                     cv2.LINE_AA,
                 )
+            else:
+                self._cascade_miss_count += 1
 
         if raw_face_detected:
             # Kinematic velocity estimation
@@ -277,16 +339,27 @@ class FaceMeshTracker:
                 self._recenter_needed = False
                 logger.info("Auto-recalibrated neutral baseline to %.2f on new camera frame", raw_y)
 
-            # Anti-deadband dynamic window tracking:
-            # If the user moves beyond calibrated bounds during a sudden flick,
-            # shift the active window so there is zero dead zone when reversing direction!
+            # Stable bounded dynamic window tracking:
+            # Only drift baseline if player is consistently clamped at an edge for prolonged period (>20 frames),
+            # preventing momentary head movements or noise spikes from displacing the player's zero position.
             span = max(0.01, (self._max_y_bound - self._min_y_bound))
             if raw_y > self._max_y_bound:
-                self._max_y_bound = raw_y
-                self._min_y_bound = self._max_y_bound - span
-            elif raw_y < self._min_y_bound:
-                self._min_y_bound = raw_y
-                self._max_y_bound = self._min_y_bound + span
+                self._clamped_at_max_count += 1
+                if self._clamped_at_max_count > 20:
+                    drift = (raw_y - self._max_y_bound) * 0.08
+                    self._max_y_bound += drift
+                    self._min_y_bound += drift
+            else:
+                self._clamped_at_max_count = 0
+
+            if raw_y < self._min_y_bound:
+                self._clamped_at_min_count += 1
+                if self._clamped_at_min_count > 20:
+                    drift = (raw_y - self._min_y_bound) * 0.08
+                    self._min_y_bound += drift
+                    self._max_y_bound += drift
+            else:
+                self._clamped_at_min_count = 0
 
             # Map raw_y into normalized linear [0.0, 1.0]
             linear_y = (raw_y - self._min_y_bound) / span
@@ -302,16 +375,16 @@ class FaceMeshTracker:
             mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
             # Dynamic Adaptive Alpha:
-            # Use base_alpha for stillness/subtle movements to eliminate micro-jitter,
-            # and smoothly scale up to 0.85 during sudden head flicks for instant response.
-            base_alpha = getattr(self.config, "ema_alpha", 0.25)
+            # Use base_alpha for subtle movements to eliminate micro-jitter,
+            # and smoothly scale up to 0.65 during sudden head flicks without jerky over-correction.
+            base_alpha = getattr(self.config, "ema_alpha", 0.28)
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
             else:
                 diff = abs(mapped_y - self._smoothed_y)
-                alpha_boost = min(1.0, (diff / 0.12) ** 1.3)
-                effective_alpha = base_alpha + (0.85 - base_alpha) * alpha_boost
+                alpha_boost = min(1.0, (diff / 0.15) ** 1.3)
+                effective_alpha = base_alpha + (0.65 - base_alpha) * alpha_boost
                 self._smoothed_y = (effective_alpha * mapped_y) + ((1.0 - effective_alpha) * self._smoothed_y)
 
         else:

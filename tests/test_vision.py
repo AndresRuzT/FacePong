@@ -41,9 +41,9 @@ class TestVisionTracker(unittest.TestCase):
         high_sens_config = CameraConfig(head_sensitivity=3.0, default_range_spread=0.15)
         tracker = FaceMeshTracker(high_sens_config)
         tracker.calibrate_baseline(neutral_y=0.50)
-        expected_spread = 0.15 / 3.0  # 0.05
-        self.assertAlmostEqual(tracker._min_y_bound, 0.45, delta=0.01)
-        self.assertAlmostEqual(tracker._max_y_bound, 0.55, delta=0.01)
+        expected_spread = 0.15 / (3.0 ** 0.6)
+        self.assertAlmostEqual(tracker._min_y_bound, 0.50 - expected_spread, delta=0.01)
+        self.assertAlmostEqual(tracker._max_y_bound, 0.50 + expected_spread, delta=0.01)
 
     def test_threaded_camera_synthetic_generation(self):
         from facepong.vision.camera import ThreadedCamera
