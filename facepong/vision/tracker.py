@@ -168,35 +168,35 @@ class FaceMeshTracker:
                     landmarks = results.multi_face_landmarks[0].landmark
                     nose_point = landmarks[NOSE_TIP_IDX]
                     glabella_point = landmarks[GLABELLA_IDX]
-                # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
-                raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
+                    # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
+                    raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
 
-                # Render futuristic landmarks onto HUD preview
-                nose_px = int(nose_point.x * preview_w)
-                nose_py = int(nose_point.y * preview_h)
+                    # Render futuristic landmarks onto HUD preview
+                    nose_px = int(nose_point.x * preview_w)
+                    nose_py = int(nose_point.y * preview_h)
 
-                for idx in CONTOUR_KEYPOINTS:
-                    pt = landmarks[idx]
-                    cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 1, (0, 180, 255), -1)
+                    for idx in CONTOUR_KEYPOINTS:
+                        pt = landmarks[idx]
+                        cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 1, (0, 180, 255), -1)
 
-                for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
-                    pt = landmarks[idx]
-                    cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 2, (255, 0, 180), -1)
+                    for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
+                        pt = landmarks[idx]
+                        cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 2, (255, 0, 180), -1)
 
-                cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
-                cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
-                cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
+                    cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
+                    cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
+                    cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
 
-                cv2.putText(
-                    hud_frame,
-                    "TRACKING: LOCKED",
-                    (8, preview_h - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35,
-                    (0, 255, 180),
-                    1,
-                    cv2.LINE_AA,
-                )
+                    cv2.putText(
+                        hud_frame,
+                        "TRACKING: LOCKED",
+                        (8, preview_h - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        (0, 255, 180),
+                        1,
+                        cv2.LINE_AA,
+                    )
             except Exception as exc:
                 logger.debug("MediaPipe Face Mesh process exception: %s", exc)
 
@@ -205,7 +205,7 @@ class FaceMeshTracker:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Downscale 2x for fast execution without frame drops
             small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
-            faces = self._cascade.detectMultiScale(small_gray, scaleFactor=1.2, minNeighbors=3, minSize=(20, 20))
+            faces = self._cascade.detectMultiScale(small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25))
             if len(faces) > 0:
                 raw_face_detected = True
                 fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])

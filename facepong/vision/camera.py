@@ -179,7 +179,8 @@ class ThreadedCamera:
     ):
         self.device_index, self.device_description = find_preferred_camera_device(device_index)
         self.is_external_usb = (
-            "external" in self.device_description.lower()
+            device_index is not None
+            or "external" in self.device_description.lower()
             or ("usb" in self.device_description.lower() and "integrated" not in self.device_description.lower())
         )
         self.target_width = width
