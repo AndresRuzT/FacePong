@@ -93,17 +93,22 @@ class FaceMeshTracker:
         except Exception as exc:
             logger.warning("MediaPipe initialization failed (%s).", exc)
 
-        # Initialize OpenCV Cascade as active motion-blur backup if XML model is available on system
+        # Initialize OpenCV Cascade as primary/complementary detector
         try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            bundled_path = os.path.join(current_dir, "haarcascade_frontalface_default.xml")
             cascade_dir = getattr(cv2.data, "haarcascades", "")
-            cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-            if os.path.exists(cascade_path):
-                cascade = cv2.CascadeClassifier(cascade_path)
-                if not cascade.empty():
-                    self._cascade = cascade
-                    logger.info("OpenCV Haar Cascade initialized as motion-blur backup detector")
+            system_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
+
+            for c_path in (bundled_path, system_path):
+                if os.path.exists(c_path):
+                    cascade = cv2.CascadeClassifier(c_path)
+                    if not cascade.empty():
+                        self._cascade = cascade
+                        logger.info("OpenCV Haar Cascade initialized from: %s", c_path)
+                        break
         except Exception as exc:
-            logger.debug("OpenCV Cascade backup not available: %s", exc)
+            logger.debug("OpenCV Cascade initialization error: %s", exc)
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
