@@ -58,5 +58,19 @@ class TestVisionTracker(unittest.TestCase):
         self.assertTrue(tracker._recenter_needed)
 
 
+    def test_cascade_fallback_when_facemesh_disabled(self):
+        tracker = FaceMeshTracker(self.config)
+        # Verify cascade loaded
+        self.assertIsNotNone(tracker._cascade)
+        self.assertFalse(tracker._cascade.empty())
+
+        # Simulate mediapipe unavailable
+        tracker._face_mesh = None
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        detected, raw_y, smoothed_y, hud_preview = tracker.process_frame(frame)
+        self.assertFalse(detected)
+        self.assertEqual(hud_preview.shape, (self.config.preview_height, self.config.preview_width, 3))
+
+
 if __name__ == "__main__":
     unittest.main()

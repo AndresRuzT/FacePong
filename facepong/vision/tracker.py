@@ -1,6 +1,7 @@
 """MediaPipe Face Mesh tracker with exponential moving average filtering and adaptive baseline."""
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -101,14 +102,17 @@ class FaceMeshTracker:
             system_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
 
             for c_path in (bundled_path, system_path):
-                if os.path.exists(c_path):
+                if c_path and os.path.exists(c_path):
                     cascade = cv2.CascadeClassifier(c_path)
                     if not cascade.empty():
                         self._cascade = cascade
                         logger.info("OpenCV Haar Cascade initialized from: %s", c_path)
                         break
         except Exception as exc:
-            logger.debug("OpenCV Cascade initialization error: %s", exc)
+            logger.warning("OpenCV Cascade initialization error: %s", exc)
+
+        if self._face_mesh is None and self._cascade is None:
+            logger.error("No face tracking backend available! Neither MediaPipe Face Mesh nor OpenCV Haar Cascade could be loaded.")
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
@@ -200,23 +204,44 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("MediaPipe Face Mesh process exception: %s", exc)
 
-        # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur during sudden head flick)
+        # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur or platforms without mp.solutions)
         if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # Downscale 2x for fast execution without frame drops
-            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
-            faces = self._cascade.detectMultiScale(small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25))
+            # Downscale only if frame width > 360 to prevent over-shrinking small kiosk faces
+            if w > 360:
+                scale_factor = 320.0 / float(w)
+                detect_img = cv2.resize(gray, (0, 0), fx=scale_factor, fy=scale_factor)
+                inv_scale = 1.0 / scale_factor
+            else:
+                detect_img = gray
+                inv_scale = 1.0
+
+            # Equalize histogram to handle harsh indoor lighting / camera exposure variations
+            detect_img = cv2.equalizeHist(detect_img)
+
+            faces = self._cascade.detectMultiScale(
+                detect_img,
+                scaleFactor=1.1,
+                minNeighbors=3,
+                minSize=(20, 20),
+            )
             if len(faces) > 0:
                 raw_face_detected = True
                 fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+                # Restore original frame coordinates
+                orig_fx = fx * inv_scale
+                orig_fy = fy * inv_scale
+                orig_fw = fw * inv_scale
+                orig_fh = fh * inv_scale
+
                 # Calibrated 0.52 offset matches mid-face landmark vertical level precisely
-                center_y = (fy * 2.0) + (fh * 2.0) * 0.52
+                center_y = orig_fy + orig_fh * 0.52
                 raw_y = float(center_y / h)
 
-                p_fx = int(fx * 2.0 * scale_x)
-                p_fy = int(fy * 2.0 * scale_y)
-                p_fw = int(fw * 2.0 * scale_x)
-                p_fh = int(fh * 2.0 * scale_y)
+                p_fx = int(orig_fx * scale_x)
+                p_fy = int(orig_fy * scale_y)
+                p_fw = int(orig_fw * scale_x)
+                p_fh = int(orig_fh * scale_y)
                 cv2.rectangle(hud_frame, (p_fx, p_fy), (p_fx + p_fw, p_fy + p_fh), (0, 240, 255), 1)
                 cx = p_fx + p_fw // 2
                 cy = p_fy + p_fh // 2
@@ -224,7 +249,7 @@ class FaceMeshTracker:
 
                 cv2.putText(
                     hud_frame,
-                    "CASCADE: LOCKED",
+                    "TRACKING: LOCKED",
                     (8, preview_h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.35,
