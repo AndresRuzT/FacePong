@@ -319,7 +319,8 @@ class NeonRenderer:
         self.screen.blit(surf_score, score_rect)
 
         # Team names
-        lbl_p = self.font_hud.render("PLAYER [FACE]", True, self.colors.player_primary)
+        prof_tag = getattr(tracking_state, "device_profile_label", "AUTO")
+        lbl_p = self.font_hud.render(f"PLAYER [{prof_tag}]", True, self.colors.player_primary)
         lbl_ai = self.font_hud.render("AUDACIA AI", True, self.colors.ai_primary)
         self.screen.blit(lbl_p, (score_rect.left - 130, 28))
         self.screen.blit(lbl_ai, (score_rect.right + 18, 28))
@@ -383,7 +384,8 @@ class NeonRenderer:
             self.screen.blit(placeholder, (px + 2, py + 2))
 
         # Status tag
-        stat_text = "FACE LOCKED" if tracking_state.face_detected else "SEARCHING"
+        prof_tag = getattr(tracking_state, "device_profile_label", "AUTO")
+        stat_text = f"LOCKED • {prof_tag}" if tracking_state.face_detected else f"SEEK • {prof_tag}"
         stat_surf = self.font_hud.render(stat_text, True, border_col)
         self.screen.blit(stat_surf, (px + 4, py + ph - 16))
 

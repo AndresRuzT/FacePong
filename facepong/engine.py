@@ -51,6 +51,7 @@ class GameEngine:
 
         # Core Subsystems
         self.vision = VisionPipeline(config.camera)
+        self.vision.set_screen_dimensions(display_w, display_h)
         self.state_mgr = GameStateManager(
             winning_score=config.physics.winning_score,
             inactivity_timeout_sec=config.camera.inactivity_timeout_sec,
@@ -123,6 +124,7 @@ class GameEngine:
         w = max(640, new_w)
         h = max(480, new_h)
         self.screen = pygame.display.set_mode((w, h), pygame.DOUBLEBUF | pygame.RESIZABLE)
+        self.vision.set_screen_dimensions(w, h)
         self._calculate_arena_geometry(w, h)
         self.renderer.update_geometry(self.screen, self.arena_rect)
         self.screens.update_geometry(self.renderer)
@@ -175,6 +177,10 @@ class GameEngine:
                     return
                 elif event.key == pygame.K_d:
                     self.config.debug_mode = not self.config.debug_mode
+                elif event.key == pygame.K_t:
+                    new_prof = self.vision.cycle_device_profile()
+                    self.sound.play("beep")
+                    logger.info("Player cycled device profile to: %s", new_prof.value)
                 elif event.key == pygame.K_SPACE:
                     if self.state_mgr.current_state == ExhibitionState.ATTRACT:
                         self.state_mgr.change_state(ExhibitionState.CALIBRATING)

@@ -72,5 +72,44 @@ class TestVisionTracker(unittest.TestCase):
         self.assertEqual(hud_preview.shape, (self.config.preview_height, self.config.preview_width, 3))
 
 
+    def test_device_profile_cycling_and_adaptation(self):
+        from facepong.config import DeviceProfile
+        tracker = FaceMeshTracker(self.config)
+        self.assertEqual(tracker.device_profile, DeviceProfile.AUTO)
+
+        # Profile cycling
+        p1 = tracker.cycle_device_profile()
+        self.assertEqual(p1, DeviceProfile.TV)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.060)
+
+        p2 = tracker.cycle_device_profile()
+        self.assertEqual(p2, DeviceProfile.LAPTOP)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.105)
+
+        p3 = tracker.cycle_device_profile()
+        self.assertEqual(p3, DeviceProfile.TABLET)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.145)
+
+        p4 = tracker.cycle_device_profile()
+        self.assertEqual(p4, DeviceProfile.AUTO)
+
+    def test_auto_profile_scales_with_screen_and_distance(self):
+        from facepong.config import DeviceProfile
+        tracker = FaceMeshTracker(self.config)
+        tracker.device_profile = DeviceProfile.AUTO
+
+        # Large screen (TV 1080p) should have tighter base spread than standard laptop
+        tracker.set_screen_dimensions(1920, 1080)
+        spread_tv = tracker.get_effective_range_spread()
+        tracker.set_screen_dimensions(1280, 720)
+        spread_laptop = tracker.get_effective_range_spread()
+        self.assertLess(spread_tv, spread_laptop)
+
+        # Distance normalization: face far away (couch, 0.12 fraction) should have tighter spread
+        spread_far = tracker.get_effective_range_spread(face_height_fraction=0.12)
+        spread_near = tracker.get_effective_range_spread(face_height_fraction=0.35)
+        self.assertLess(spread_far, spread_near)
+
+
 if __name__ == "__main__":
     unittest.main()

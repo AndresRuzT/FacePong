@@ -66,8 +66,8 @@ class ScreenManager:
         prompt_surf = self.renderer.font_banner.render(prompt_str, True, callout_color)
         self.screen.blit(prompt_surf, prompt_surf.get_rect(center=(center_x, center_y + 25)))
 
-        # 3. Minimal Subtle Secondary Prompt (Keyboard alternative)
-        kb_str = "[ O PRESIONA ESPACIO PARA INICIAR ]" if is_spanish else "[ OR PRESS SPACE TO START ]"
+        # 3. Minimal Subtle Secondary Prompt (Keyboard alternative + Profile hint)
+        kb_str = "[ ESPACIO: INICIAR   •   T: PERFIL DISPOSITIVO ]" if is_spanish else "[ SPACE: START   •   T: DEVICE PROFILE ]"
         kb_surf = self.renderer.font_hud.render(kb_str, True, self.colors.text_muted)
         self.screen.blit(kb_surf, kb_surf.get_rect(center=(center_x, center_y + 68)))
 

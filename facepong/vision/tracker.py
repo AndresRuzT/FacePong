@@ -12,7 +12,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from facepong.config import CameraConfig
+from facepong.config import CameraConfig, DeviceProfile
 from facepong.vision.camera import ThreadedCamera
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ class TrackingState:
     preview_surface_buffer: Optional[np.ndarray] = None
     calibration_progress: float = 0.0
     is_calibrated: bool = False
+    device_profile_label: str = "AUTO"
 
 
 class FaceMeshTracker:
@@ -87,7 +88,71 @@ class FaceMeshTracker:
         # YuNet ROI tracking state (2-phase detection: ROI fast path + full scan fallback)
         self._yunet_last_box: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h) in detect-space
         self._yunet_roi_miss: int = 0
+
+        # Device profile & screen adaptive sensitivity
+        self.device_profile: DeviceProfile = getattr(config, "device_profile", DeviceProfile.AUTO)
+        self._screen_height: int = 720
+
         self._init_detector()
+
+    def set_screen_dimensions(self, width: int, height: int) -> None:
+        """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
+        self._screen_height = height
+
+    def get_effective_range_spread(self, face_height_fraction: Optional[float] = None) -> float:
+        """
+        Calculates optimal head motion spread standardized across device classes:
+          - TV: player is 1.5-3m away on a large display -> tight spread (~0.060), high sensitivity
+          - LAPTOP: player is ~50cm away at desk -> standard spread (~0.105), stable control
+          - TABLET: player is ~35cm away, close-up -> wide spread (~0.145), gentle control
+          - AUTO: detects screen resolution and scales inversely with physical distance (face size)
+        """
+        if self.device_profile == DeviceProfile.TV:
+            base_spread = 0.060
+        elif self.device_profile == DeviceProfile.LAPTOP:
+            base_spread = 0.105
+        elif self.device_profile == DeviceProfile.TABLET:
+            base_spread = 0.145
+        else:
+            # AUTO profile:
+            # TVs / large displays are >= 1000px height
+            if self._screen_height >= 1000:
+                base_spread = 0.068
+            else:
+                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
+                config_spread = getattr(self.config, "default_range_spread", 0.18)
+                base_spread = config_spread / (sensitivity ** 0.6)
+
+        # Distance normalization: face size is inversely proportional to player distance
+        if face_height_fraction is not None and face_height_fraction > 0.04:
+            ref_scale = 0.26  # reference face height fraction at 50cm laptop desk
+            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.45, 1.55))
+            return float(base_spread * dist_multiplier)
+
+        return float(base_spread)
+
+    def get_effective_ema_alpha(self) -> float:
+        """Returns baseline EMA smoothing factor tuned for device ergonomics."""
+        if self.device_profile == DeviceProfile.TV:
+            return 0.32
+        elif self.device_profile == DeviceProfile.LAPTOP:
+            return 0.26
+        elif self.device_profile == DeviceProfile.TABLET:
+            return 0.22
+        return getattr(self.config, "ema_alpha", 0.28)
+
+    def cycle_device_profile(self) -> DeviceProfile:
+        """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
+        order = [DeviceProfile.AUTO, DeviceProfile.TV, DeviceProfile.LAPTOP, DeviceProfile.TABLET]
+        try:
+            idx = order.index(self.device_profile)
+            next_idx = (idx + 1) % len(order)
+        except ValueError:
+            next_idx = 0
+        self.device_profile = order[next_idx]
+        self.calibrate_baseline(self._last_valid_raw_y)
+        logger.info("Switched device profile to: %s", self.device_profile.value)
+        return self.device_profile
 
     def _init_detector(self) -> None:
         """Initializes MediaPipe Face Mesh OR OpenCV YuNet Deep Neural Network as primary detectors."""
@@ -156,14 +221,12 @@ class FaceMeshTracker:
     def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None) -> None:
         """Sets comfortable dynamic range around player's neutral head position based on sensitivity."""
         if range_spread is None:
-            sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
-            base_spread = getattr(self.config, "default_range_spread", 0.18)
-            range_spread = base_spread / (sensitivity ** 0.6)
+            range_spread = self.get_effective_range_spread()
         self._min_y_bound = max(0.02, neutral_y - range_spread)
         self._max_y_bound = min(0.98, neutral_y + range_spread)
         logger.info(
-            "Calibrated head range: [%.2f, %.2f] around neutral %.2f (effective spread: ±%.3f)",
-            self._min_y_bound, self._max_y_bound, neutral_y, range_spread,
+            "Calibrated head range: [%.2f, %.2f] around neutral %.2f (effective spread: ±%.3f, profile: %s)",
+            self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
         )
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
@@ -209,6 +272,11 @@ class FaceMeshTracker:
                     raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
                     det_nose_x = nose_point.x * w
                     det_nose_y = nose_point.y * h
+                    # Chin is landmark 152, top forehead is landmark 10
+                    det_fh = abs(landmarks[152].y - landmarks[10].y) * h
+                    det_fw = abs(landmarks[454].x - landmarks[234].x) * w
+                    det_fx = nose_point.x * w - det_fw * 0.5
+                    det_fy = nose_point.y * h - det_fh * 0.5
             except Exception as exc:
                 logger.debug("MediaPipe Face Mesh process exception: %s", exc)
 
@@ -240,11 +308,25 @@ class FaceMeshTracker:
 
             # Re-anchor baseline immediately if camera was switched or requested, OR on very first face seen
             if self._recenter_needed or self._is_first_sample:
-                self.calibrate_baseline(raw_y)
+                face_frac = (det_fh / float(h)) if (det_fh > 0 and h > 0) else None
+                init_spread = self.get_effective_range_spread(face_frac)
+                self.calibrate_baseline(raw_y, range_spread=init_spread)
                 self._smoothed_y = 0.5
                 self._is_first_sample = False
                 self._recenter_needed = False
-                logger.info("Auto-anchored neutral baseline to %.2f on initial face detection", raw_y)
+                logger.info(
+                    "Auto-anchored neutral baseline to %.2f (spread: ±%.3f, profile: %s)",
+                    raw_y, init_spread, self.device_profile.value,
+                )
+
+            # In AUTO mode, dynamically and smoothly adapt sensitivity based on player distance
+            if self.device_profile == DeviceProfile.AUTO and det_fh > 0 and h > 0:
+                target_spread = self.get_effective_range_spread(det_fh / float(h))
+                current_spread = 0.5 * (self._max_y_bound - self._min_y_bound)
+                new_spread = 0.96 * current_spread + 0.04 * target_spread
+                mid_y = 0.5 * (self._min_y_bound + self._max_y_bound)
+                self._min_y_bound = max(0.02, mid_y - new_spread)
+                self._max_y_bound = min(0.98, mid_y + new_spread)
 
             # Drift baseline if player is consistently clamped at an edge (>12 frames)
             span = max(0.01, (self._max_y_bound - self._min_y_bound))
@@ -278,7 +360,7 @@ class FaceMeshTracker:
             mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
             # Single-pass adaptive EMA smoothing
-            base_alpha = getattr(self.config, "ema_alpha", 0.28)
+            base_alpha = self.get_effective_ema_alpha()
             if self._is_first_sample:
                 self._smoothed_y = mapped_y
                 self._is_first_sample = False
@@ -557,6 +639,24 @@ class VisionPipeline:
         with self._lock:
             self._finish_calibration()
 
+    def set_screen_dimensions(self, width: int, height: int) -> None:
+        """Notifies tracker of screen resolution to calibrate adaptive sensitivity."""
+        self.tracker.set_screen_dimensions(width, height)
+
+    def cycle_device_profile(self) -> DeviceProfile:
+        """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
+        new_prof = self.tracker.cycle_device_profile()
+        with self._lock:
+            self._state.device_profile_label = new_prof.value
+        return new_prof
+
+    def set_device_profile(self, profile: DeviceProfile) -> None:
+        """Sets a specific device profile."""
+        self.tracker.device_profile = profile
+        self.tracker.calibrate_baseline(self.tracker._last_valid_raw_y)
+        with self._lock:
+            self._state.device_profile_label = profile.value
+
     def recenter_baseline(self) -> None:
         """Forces tracker to re-anchor neutral position on next frame."""
         self.tracker.reset_for_new_camera()
@@ -585,6 +685,7 @@ class VisionPipeline:
                     self._state.raw_y = raw_y
                     self._state.smoothed_y = smoothed_y
                     self._state.preview_surface_buffer = hud_preview
+                    self._state.device_profile_label = self.tracker.device_profile.value
                     if detected:
                         self._state.last_detected_time = now
 
@@ -621,6 +722,7 @@ class VisionPipeline:
                 preview_surface_buffer=self._state.preview_surface_buffer,
                 calibration_progress=self._state.calibration_progress,
                 is_calibrated=self._state.is_calibrated,
+                device_profile_label=self.tracker.device_profile.value,
             )
 
     def stop(self) -> None:

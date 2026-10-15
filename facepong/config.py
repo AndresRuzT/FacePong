@@ -1,7 +1,15 @@
 """Configuration parameters for FacePong."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional, Tuple
+
+
+class DeviceProfile(str, Enum):
+    AUTO = "AUTO"
+    TV = "TV"
+    LAPTOP = "LAPTOP"
+    TABLET = "TABLET"
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,7 @@ class CameraConfig:
     preview_width: int = 192
     preview_height: int = 144
     flip_horizontal: bool = True
+    device_profile: DeviceProfile = DeviceProfile.AUTO
     # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
     ema_alpha: float = 0.25
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
