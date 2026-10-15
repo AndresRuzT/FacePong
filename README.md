@@ -1,99 +1,117 @@
 # FacePong
 
-> Interactive arcade Pong powered by real-time computer vision and adaptive artificial intelligence. Designed for interactive public exhibitions and single-board embedded systems (Raspberry Pi 4 / 5).
+> High-performance contactless arcade Pong driven by real-time computer vision and adaptive artificial intelligence. Engineered for public exhibition kiosks, desktop workstations, and embedded single-board computers (Raspberry Pi 4 / 5).
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Raspberry%20Pi%204%20%2F%205%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows-orange.svg)]()
-[![Research Center](https://img.shields.io/badge/Research%20Center-AudacIA-cyan.svg)](https://audacia.unisimon.edu.co/)
-
-**FacePong** delivers a contactless arcade experience where the player guides their paddle using head position and subtle facial gestures. The opponent is driven by an **Adaptive Artificial Intelligence** agent that continuously calibrates its reaction latency, prediction accuracy, and motor error against the live scoreline and shot dynamics, ensuring matches remain engaging, challenging, and winnable for casual and seasoned players alike.
-
----
-
-## Core Capabilities
-
-- **Hands-Free Facial Landmark Control**: High-precision head tracking utilizing MediaPipe Face Mesh (glabella/nasal root tracking). Features dual-stage motion filtering: instantaneous linear tracking for rapid, reflexive head maneuvers combined with dynamic Exponential Moving Average (EMA) dampening for subtle micro-adjustments.
-- **Dynamic Difficulty Adjustment (DDA)**: The AI opponent computes multi-bounce wall reflections using geometric raycasting. Intentional error margins scale realistically with shot difficulty: trivial serves are returned consistently, while sharp angled cuts and high-speed smashes challenge the AI and reward skilled player shots.
-- **Autonomous Kiosk State Machine**: Self-contained lifecycle management (`ATTRACT` &rarr; `CALIBRATION` &rarr; `MATCH` &rarr; `GAME OVER`). Includes an **Inactivity Watchdog** that monitors player presence and gracefully resets unattended games back to attract mode.
-- **Retro-Futuristic Neon Aesthetic**: Real-time glow shaders, dynamic particle physics (goal bursts, celebratory victory fountains), cybernetic camera picture-in-picture (PIP) with facial wireframe overlay, and custom arena bezel layout.
-- **Zero-Asset Procedural Audio**: Integrated real-time sound synthesizer powered by NumPy waveform generation, producing arcade blips, wall reflections, goal explosions, and victory fanfares without external audio asset files.
-- **Dynamic Camera Hot-Plugging**: Robust multi-camera probing that prioritizes external USB cameras over integrated webcams, auto-recovers from disconnections, and switches capture streams on the fly without game interruption.
-- **Embedded Hardware Optimization**: Multithreaded decoupling between the 60 FPS Pygame render loop and asynchronous camera inference workers, ensuring fluid gameplay on Raspberry Pi 4 and 5 hardware.
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Raspberry_Pi_4%2F5_%7C_Linux_%7C_macOS_%7C_Windows-F1502F.svg)]()
+[![Inference](https://img.shields.io/badge/Vision-YuNet_ONNX_%7C_MediaPipe-009688.svg)]()
+[![Research Center](https://img.shields.io/badge/Research_Center-AudacIA-673AB7.svg)](https://audacia.unisimon.edu.co/)
 
 ---
 
-## Architecture Overview
+## Overview
 
-FacePong is architected around decoupled, concurrent subsystems that segregate video frame acquisition and deep-learning inference from the deterministic physics and rendering loop:
+**FacePong** is a hands-free, vision-controlled arcade experience developed for public exhibition spaces and interactive robotics showcases. Players maneuver their paddle purely through intuitive vertical head gestures and subtle nods. The opposing paddle is operated by an **Adaptive Dynamic Difficulty Adjustment (DDA)** artificial intelligence agent that continuously models shot trajectories, wall reflections, and human reaction latency to keep rallies challenging, exciting, and accessible.
+
+To deliver flawless, latency-free tracking on resource-constrained embedded systems such as the **Raspberry Pi 4**, FacePong features an asynchronous, dual-threaded architecture with a **2-Phase Region-of-Interest (ROI) YuNet Deep Neural Network**, automatic screen/device profile standardization (`TV`, `LAPTOP`, `TABLET`, `AUTO`), and zero-allocation procedural audio.
+
+---
+
+## System Architecture
+
+FacePong decouples camera frame acquisition and deep-learning inference from the 60 FPS deterministic physics and render loop using thread-safe synchronization:
 
 ```mermaid
 flowchart TD
-    subgraph VisionPipeline ["Vision & Tracking Worker (Background Thread)"]
-        Cam["Camera Capture (V4L2 / USB / Auto-Recovery)"] --> Frame["Frame Preprocessing & PIP Resizing"]
-        Frame --> MP["MediaPipe Face Mesh (Landmark Inference)"]
-        MP --> Filter["Dual-Stage EMA & Saccade Filter"]
-        Filter --> State["Thread-Safe Tracking State"]
+    subgraph VisionSubsystem["Vision Pipeline (Asynchronous Worker Thread)"]
+        Cam["Frame Acquisition<br/>(V4L2 / USB / Auto-Recovery)"] --> Pre["ROI Cropping & Preprocessing"]
+        Pre --> Tracker{"Detector Engine"}
+        Tracker -->|"Raspberry Pi 4/5"| YuNet["2-Phase YuNet ONNX<br/>(ROI Fast Path ~2ms / Full Scan)"]
+        Tracker -->|"Desktop / x86_64"| MP["MediaPipe Face Mesh<br/>(3D Mesh / Landmarks)"]
+        YuNet --> Anchor["Anatomical Mid-Face Anchor<br/>(Eyes 40% + Center 35% + Nose 25%)"]
+        MP --> Anchor
+        Anchor --> Adapt["Dynamic Distance Normalization<br/>(Face Scale fh/h + Screen Bounds)"]
+        Adapt --> Filter["Adaptive EMA Filter & Velocity Estimator"]
+        Filter --> State[("Thread-Safe Tracking State<br/>(Zero-Copy RGB Buffer)")]
     end
 
-    subgraph GameCore ["Main Game Engine (60 FPS Main Thread)"]
-        State --> SM["Exhibition State Machine (Attract / Calibrate / Match / Game Over)"]
-        SM --> Physics["Physics & Collision System (Ball & Paddles)"]
-        Physics --> AI["Adaptive AI Controller (Raycasting & Dynamic Difficulty)"]
-        Physics --> Audio["Procedural Audio Synthesizer (NumPy Waves)"]
-        Physics --> Particles["Particle Physics System (Bursts & Celebration FX)"]
+    subgraph GameSubsystem["Engine & Gameplay (60 FPS Main Loop)"]
+        State --> Input["Paddle Controller<br/>(Target Interpolation)"]
+        Input --> Physics["Deterministic Physics Engine<br/>(Ball, Paddles & Arena Geometry)"]
+        Physics --> AI["Adaptive AI Controller<br/>(Raycast Trajectory & DDA)"]
+        Physics --> FX["Particle System & Screen Shake"]
+        Physics --> Audio["Procedural Audio Synthesizer<br/>(Real-Time Waveforms)"]
+        Physics --> SM{"Exhibition State Machine"}
+        SM -->|"Timeout"| Watchdog["Presence Watchdog<br/>(Auto-Reset to Attract)"]
     end
 
-    subgraph Presentation ["Display & Output"]
-        Physics --> Renderer["Neon Arcade Renderer (Double-Buffered Pygame Display)"]
-        Particles --> Renderer
+    subgraph PresentationSubsystem["Rendering & Output"]
+        Physics --> Renderer["Neon Arcade Renderer<br/>(Double-Buffered Pygame Screen)"]
+        FX --> Renderer
         State --> Renderer
-        Audio --> Speakers["Audio Output Device (ALSA / PulseAudio / HDMI)"]
+        Audio --> AudioOut["Audio Output<br/>(ALSA / PulseAudio / HDMI)"]
+        Renderer --> Display["Display Device<br/>(TV / Monitor / Kiosk Display)"]
     end
 ```
 
-### Subsystem Breakdown
+---
 
-1. **Vision Pipeline (`facepong.vision`)**:
-   - `camera.py`: Asynchronous camera capture worker managing hardware frame buffers with V4L2 backend support, hot-plug detection, and graceful device fallback.
-   - `tracker.py`: Tracks 3D facial landmarks, applies dual-stage motion stabilization, performs dynamic baseline auto-anchoring, and generates HUD wireframe contours.
-2. **Game Systems (`facepong.game`)**:
-   - `engine.py`: Master controller driving delta-time synchronization, input event loops, and game lifecycle state transitions.
-   - `ai.py`: Predictive trajectory raycasting with dynamic shot-difficulty error modulation and human-like reaction latency.
-   - `entities.py`: Deterministic entity physics for paddle motion (SmoothDamp), multi-bounce ball collisions, and collision particle emissions.
-   - `audio.py`: Pure mathematical waveform generation (square, sine, and frequency chirps) mapped directly to Pygame sound channels.
-   - `state.py`: Exhibition state machine handling timeouts, scoring, rally statistics, and win condition triggers.
-3. **User Interface (`facepong.ui`)**:
-   - `renderer.py`: Optimized neon glow rendering, outer arena borders, dynamic bloom effects, and diagnostic HUD overlays.
-   - `screens.py`: Standalone visual scenes for attract kiosk mode, calibration countdowns, goal banners, and post-match victory cards.
+## Key Engineering Innovations
+
+### 1. 2-Phase YuNet ROI Tracking (Raspberry Pi Optimization)
+Embedded ARM processors like the Broadcom BCM2711 (Raspberry Pi 4) lack hardware ARMv8 Cryptographic AES extensions, causing modern MediaPipe builds to crash on CPU instructions. FacePong solves this with OpenCV's deep-learning **YuNet ONNX model** using a 2-phase strategy:
+- **Phase 1 (ROI Fast Path)**: Evaluates a tight padded crop (~70% padding) around the last known face position. Executes in **~1.5–3.0 ms**, reducing CPU consumption by over 80%.
+- **Phase 2 (Full-Frame Fallback)**: If tracking drops, falls back to a downscaled (160×120) global scan in **~12–15 ms** to reacquire the face instantly.
+- **Anatomical Mid-Face Anchor**: Fuses 40% glabella/eye midline, 35% bounding-box centroid, and 25% nose tip. Eliminates pitch deadzones and provides natural, direct response when looking up or down.
+
+### 2. Screen & Distance Adaptive Sensitivity Profiles
+Operating across diverse form factors (from living room smart TVs to desktop monitors and tablets) creates distinct optical challenges: sitting 2.5 meters away on a couch produces smaller camera pixel shifts than sitting 50 cm from a laptop.
+
+FacePong standardizes travel sensitivity across setups:
+
+| Profile | Target Environment | Spread ($\pm$) | Smoothing ($\alpha$) | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **`TV`** | Living room / Kiosks (1.5–3.5 m) | $\pm 0.060$ | `0.32` | Tight motion threshold; subtle head nods effortlessly cover full vertical court on large displays. |
+| **`LAPTOP`** | Desk workstation (~50 cm) | $\pm 0.105$ | `0.26` | Balanced dynamic range for close-range desk usage. |
+| **`TABLET`** | Handheld / Ultra-near (~30–40 cm) | $\pm 0.145$ | `0.22` | Wide range dampening micro-movements for handheld or tablet mounts. |
+| **`AUTO`** | Universal (Default) | Dynamic | Dynamic | Automatically queries display resolution and scales spread inversely with physical face size ($f_h / h$). |
+
+> **Interactive Toggle**: Press **`T`** at any point during execution to cycle profiles on the fly with instantaneous HUD feedback.
+
+### 3. Predictive Raycasting & Dynamic Difficulty Adjustment (DDA)
+The AI opponent evaluates incoming shots using multi-bounce geometric raycasting along arena boundaries. Rather than playing with superhuman perfection, the AI applies a calibrated error margin inversely proportional to shot difficulty:
+- Routine, low-velocity serves are returned reliably to sustain engaging volleys.
+- High-velocity angled cuts and edge deflections introduce human-like reaction delays and deflection spread, rewarding skilled player smashes.
+
+### 4. Zero-Asset Procedural Audio & Real-Time Neon Shaders
+- **Procedural Audio**: Real-time sound synthesis using NumPy sinusoidal and square waveform math. Generates classic arcade blips, wall reflections, goal explosions, and victory fanfares without external `.wav` or `.mp3` assets.
+- **Zero-Allocation Rendering**: Pre-rendered bloom surfaces, cached PIP buffers, and geometry-bounded double-buffering eliminate garbage collection stalls during active rallies.
 
 ---
 
 ## Hardware & System Requirements
 
-### Recommended Hardware
-- **Single-Board Computer**: Raspberry Pi 4 (4 GB / 8 GB) or Raspberry Pi 5.
-- **Display**: HDMI monitor or television (720p or 1080p resolution).
-- **Camera**: Standard USB webcam (e.g., Logitech C270, C920, or generic 1080p USB camera) or Raspberry Pi Camera Module v2 / v3.
-- **Audio Output**: HDMI audio or 3.5 mm analog stereo jack.
-
-*FacePong is fully cross-platform and executes identically on Linux, macOS, and Windows workstations.*
-
-### Software Prerequisites
-- Python 3.10 or 3.11
-- Raspberry Pi OS (64-bit Bookworm recommended) or modern Linux distribution
+| Component | Minimum Specification | Recommended Specification |
+| :--- | :--- | :--- |
+| **Compute** | Raspberry Pi 4 Model B (4 GB RAM) | Raspberry Pi 5 / x86_64 Workstation |
+| **Operating System** | Raspberry Pi OS 64-bit (Debian Bookworm) | Ubuntu 22.04+ / Debian 12 / macOS / Windows 11 |
+| **Python** | 3.10 | 3.11+ |
+| **Camera** | USB 2.0 UVC Webcam (V4L2 compatible) | 720p/1080p 30+ FPS Wide-Angle USB Camera |
+| **Display** | 720p (1280×720) HDMI Monitor | 1080p (1920×1080) Television or Arcade Display |
+| **Audio** | HDMI Audio / 3.5 mm Analog Out | HDMI Audio with external arcade speakers |
 
 ---
 
 ## Installation
 
-### 1. Clone Repository
+### 1. Clone the Repository
 ```bash
-git clone https://github.com/AudacIA/FacePong.git
+git clone https://github.com/AndresRuzT/FacePong.git
 cd FacePong
 ```
 
-### 2. Configure Virtual Environment
+### 2. Set Up Virtual Environment
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -101,92 +119,111 @@ source .venv/bin/activate
 
 ### 3. Install Dependencies
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
 ---
 
-## Usage
+## Usage & Command-Line Interface
 
-### Standard Launch
-Run FacePong with automatic hardware detection:
+### Standard Execution
+Launch FacePong with automatic hardware detection and adaptive sensitivity:
 ```bash
 python3 main.py
 ```
 
-### Kiosk Exhibition Mode
-For public installations and fullscreen exhibition stands:
+### TV / Exhibition Kiosk Mode
+Launch in borderless fullscreen locked to the TV profile:
 ```bash
-python3 main.py --fullscreen
+python3 main.py --fullscreen --profile TV
 ```
 
-### Command-Line Arguments
+### Command-Line Arguments Reference
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--width` | integer | `1280` | Target display width in pixels |
-| `--height` | integer | `720` | Target display height in pixels |
-| `--fullscreen` | flag | `False` | Run in borderless fullscreen mode |
-| `--camera` | integer | `None` | Device index override (defaults to auto-detecting USB cameras) |
-| `--cam-width` | integer | `640` | Camera capture width |
-| `--cam-height` | integer | `480` | Camera capture height |
-| `--alpha` | float | `0.32` | Base EMA smoothing coefficient for head tracking |
-| `--sensitivity` | float | `3.6` | Head vertical motion sensitivity multiplier |
-| `--timeout` | float | `5.0` | Inactivity watchdog timeout in seconds |
-| `--win-score` | integer | `5` | Score target to conclude a match |
-| `--no-sound` | flag | `False` | Disable procedural audio synthesis |
-| `--debug` | flag | `False` | Enable diagnostic overlay (FPS, AI telemetry, tracking data) |
-| `--log-level` | string | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `--profile` | `choice` | `AUTO` | Sensitivity profile: `AUTO`, `TV`, `LAPTOP`, or `TABLET` |
+| `--width` | `int` | `1280` | Target display resolution width in pixels |
+| `--height` | `int` | `720` | Target display resolution height in pixels |
+| `--fullscreen` | `flag` | `False` | Launch in borderless fullscreen mode |
+| `--camera` | `int` | `None` | Camera device index override (auto-probes external USB first) |
+| `--cam-width` | `int` | `320` | Camera capture width (optimized for edge throughput) |
+| `--cam-height` | `int` | `240` | Camera capture height (optimized for edge throughput) |
+| `--alpha` | `float` | `0.26` | Base Exponential Moving Average (EMA) smoothing coefficient |
+| `--sensitivity` | `float` | `2.4` | Head motion sensitivity multiplier |
+| `--timeout` | `float` | `5.0` | Inactivity watchdog timeout in seconds |
+| `--win-score` | `int` | `5` | Points needed to win a match |
+| `--no-sound` | `flag` | `False` | Disable procedural audio synthesis |
+| `--debug` | `flag` | `False` | Display diagnostic telemetry overlay (FPS, velocities, bounds) |
+| `--log-level` | `choice` | `INFO` | Console logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ---
 
-## Controls & Exhibition Flow
+## Controls & Match Lifecycle
 
-| Input | Function |
+### Controls Reference
+
+| Input | Action |
 | :--- | :--- |
-| **Head Pitch (Up / Down)** | Primary gameplay control: moves player paddle along vertical axis |
-| **W / S** or **Up / Down Arrows** | Manual keyboard override for accessibility and testing |
-| **Spacebar** | Instantly start match from attract mode or skip countdown screens |
-| **D** | Toggle real-time diagnostic performance HUD |
-| **Escape** | Gracefully terminate the application |
+| **Head Tilt (Up / Down)** | Primary contactless control: steers the player paddle vertically |
+| **`T`** | Cycle device sensitivity profile (`AUTO` &rarr; `TV` &rarr; `LAPTOP` &rarr; `TABLET`) |
+| **`Space`** | Start match from attract mode or skip calibration countdown |
+| **`W` / `S`** or **`Up` / `Down`** | Manual keyboard paddle override for accessibility and testing |
+| **`D`** | Toggle real-time diagnostic performance overlay |
+| **`Esc`** | Clean application exit |
 
-### Match Lifecycle
+### Exhibition State Flow
 
-1. **Attract Mode**: Displays high-contrast cyber visuals, gameplay previews, and pulsing callouts inviting visitors forward.
-2. **Presence Detection & Calibration**: When a user is detected, a 3-second neutral face calibration locks their baseline resting position.
-3. **Competitive Match**: First to 5 points. The AI balances its defense so that well-placed shots score while casual rallies remain accessible.
-4. **Presence Watchdog**: If a player leaves mid-game, an on-screen warning initiates a 5-second countdown before resetting to attract mode.
-5. **Game Over & Summary**: Displays match statistics (rallies, scores, duration) alongside victory effects before returning to title state.
+```mermaid
+stateDiagram-v2
+    [*] --> Attract
+    Attract --> Calibration : Face Detected / Space Pressed
+    Calibration --> Playing : 3s Neutral Lock
+    Playing --> PointScored : Ball Escapes Arena Bounds
+    PointScored --> Playing : Score < Winning Score
+    PointScored --> GameOver : Score >= Winning Score
+    Playing --> Attract : Inactivity Timeout (5s Absence)
+    GameOver --> Attract : Auto-Reset (10s) / Space Pressed
+```
+
+1. **Attract Mode**: Autonomous demonstration loop with glowing neon logo, audio calls, and presence detection.
+2. **Calibration**: 3-second neutral face lock establishing the baseline center point without deadzones.
+3. **Playing**: Intense, fluid rally action with continuous trajectory prediction and dynamic difficulty adjustment.
+4. **Presence Watchdog**: Automatically detects when a player walks away, pausing gameplay and gracefully returning to Attract mode after 5 seconds of absence.
+5. **Game Over & Stats**: Displays match duration, longest rally volley count, and celebratory visual effects.
 
 ---
 
-## Performance Optimization (Raspberry Pi)
+## Raspberry Pi Deployment & Autostart
 
-To optimize frame rates and CPU efficiency on Raspberry Pi installations:
+For headless kiosk stands and interactive museum exhibitions:
 
-1. **GPU Memory Split**: Allocate a minimum of 128 MB to the GPU via `raspi-config`:
-   ```bash
-   sudo raspi-config
-   # Performance Options -> GPU Memory -> 128
-   ```
-2. **Display Scaling**: Keep game rendering at 720p (`1280x720`), which strikes the ideal balance between high-fidelity visuals and 60 FPS performance on embedded VideoCore GPUs.
-3. **Kiosk Autostart**: To configure automatic startup upon system boot:
-   ```bash
-   mkdir -p ~/.config/autostart
-   cat << 'EOF' > ~/.config/autostart/facepong.desktop
-   [Desktop Entry]
-   Type=Application
-   Name=FacePong
-   Exec=/bin/bash -c "source /home/pi/FacePong/.venv/bin/activate && python3 /home/pi/FacePong/main.py --fullscreen"
-   Terminal=false
-   EOF
-   ```
+### 1. Optimize Video Memory
+Allocate at least 128 MB to the VideoCore GPU via `raspi-config`:
+```bash
+sudo raspi-config
+# Advanced Options -> Memory Split -> 128 MB
+```
+
+### 2. Configure Kiosk Autostart on Boot
+Create an XDG autostart desktop entry:
+```bash
+mkdir -p ~/.config/autostart
+cat << 'EOF' > ~/.config/autostart/facepong.desktop
+[Desktop Entry]
+Type=Application
+Name=FacePong
+Exec=/bin/bash -c "source /home/pi/FacePong/.venv/bin/activate && python3 /home/pi/FacePong/main.py --fullscreen --profile TV"
+Terminal=false
+EOF
+```
 
 ---
 
 ## Testing & Quality Assurance
 
-The codebase includes comprehensive unit tests verifying physics, AI difficulty curves, state transitions, and vision pipeline stability:
+FacePong includes a comprehensive automated test suite covering deterministic physics, AI prediction vectors, state machine transitions, device profile adaptations, and fallback vision detectors:
 
 ```bash
 python3 -m unittest discover tests
@@ -194,6 +231,41 @@ python3 -m unittest discover tests
 
 ---
 
-## License
+## Project Structure
+
+```
+FacePong/
+├── facepong/
+│   ├── config.py              # Centralized dataclass configurations and DeviceProfile enum
+│   ├── engine.py              # Main GameEngine loop, window scaling, and event handling
+│   ├── game/
+│   │   ├── ai.py              # Predictive trajectory raycasting and DDA logic
+│   │   ├── audio.py           # Procedural mathematical sound synthesizer
+│   │   ├── entities.py        # Ball, Paddle physics, and particle emitters
+│   │   └── state.py           # Exhibition state machine and presence watchdog
+│   ├── ui/
+│   │   ├── renderer.py        # Neon arcade rendering, bloom effects, and PIP box
+│   │   └── screens.py         # Attract, calibration, and victory screen managers
+│   └── vision/
+│       ├── camera.py          # Multithreaded V4L2 capture worker with auto-recovery
+│       ├── tracker.py         # 2-Phase YuNet / MediaPipe tracker and distance adaptation
+│       └── models/
+│           └── face_detection_yunet_2023mar.onnx
+├── tests/
+│   ├── test_ai.py             # Unit tests for raycasting and difficulty adjustment
+│   ├── test_entities.py       # Physics collisions and ball kinematics tests
+│   ├── test_state.py          # State machine lifecycle and watchdog tests
+│   └── test_vision.py         # Vision pipeline, device profiles, and distance scaling tests
+├── main.py                    # Application entry point and CLI parser
+├── requirements.txt           # Python dependencies
+├── LICENSE                    # Apache 2.0 License
+└── README.md
+```
+
+---
+
+## License & Attribution
 
 FacePong is licensed under the [Apache License 2.0](LICENSE).
+
+Developed as an applied research and exhibition project for **AudacIA** — *Centro de Investigación en Robótica e Inteligencia Artificial*, [Universidad Simón Bolívar](https://audacia.unisimon.edu.co/).

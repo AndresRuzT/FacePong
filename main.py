@@ -12,6 +12,7 @@ import sys
 from facepong.config import (
     AudioConfig,
     CameraConfig,
+    DeviceProfile,
     DisplayConfig,
     GameConfig,
     PhysicsConfig,
@@ -30,8 +31,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=None, help="Camera device index (default: auto-detect prioritizing USB cameras)")
     parser.add_argument("--cam-width", type=int, default=320, help="Camera capture width (default: 320)")
     parser.add_argument("--cam-height", type=int, default=240, help="Camera capture height (default: 240)")
-    parser.add_argument("--alpha", type=float, default=0.32, help="EMA smoothing factor for head tracking (default: 0.32)")
-    parser.add_argument("--sensitivity", type=float, default=3.6, help="Head motion sensitivity multiplier (default: 3.6)")
+    parser.add_argument("--profile", type=str, default="AUTO", choices=["AUTO", "TV", "LAPTOP", "TABLET"], help="Device sensitivity profile (default: AUTO)")
+    parser.add_argument("--alpha", type=float, default=0.26, help="EMA smoothing factor for head tracking (default: 0.26)")
+    parser.add_argument("--sensitivity", type=float, default=2.4, help="Head motion sensitivity multiplier (default: 2.4)")
     parser.add_argument("--timeout", type=float, default=5.0, help="Player absence timeout in seconds (default: 5.0)")
     parser.add_argument("--win-score", type=int, default=5, help="Points needed to win match (default: 5)")
     parser.add_argument("--no-sound", action="store_true", help="Disable procedural audio synthesis")
@@ -59,6 +61,7 @@ def main() -> int:
             device_index=args.camera,
             capture_width=args.cam_width,
             capture_height=args.cam_height,
+            device_profile=DeviceProfile(args.profile.upper()),
             ema_alpha=args.alpha,
             head_sensitivity=args.sensitivity,
             inactivity_timeout_sec=args.timeout,
