@@ -82,6 +82,7 @@ class FaceMeshTracker:
         # Detectors
         self._face_mesh = None
         self._yunet = None
+        self._yunet_raw_y_smooth: Optional[float] = None
         self._cascade = None
         self._init_detector()
 
@@ -110,12 +111,12 @@ class FaceMeshTracker:
                     self._yunet = cv2.FaceDetectorYN.create(
                         model=yunet_path,
                         config="",
-                        input_size=(160, 120),
-                        score_threshold=0.45,
+                        input_size=(320, 240),
+                        score_threshold=0.35,
                         nms_threshold=0.3,
-                        top_k=20,
+                        top_k=10,
                     )
-                    logger.info("OpenCV YuNet Deep Neural Network tracker initialized from %s (optimized for 4 threads)", yunet_path)
+                    logger.info("OpenCV YuNet Deep Neural Network tracker initialized from %s (320x240, 4 threads)", yunet_path)
             except Exception as exc:
                 logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -143,6 +144,7 @@ class FaceMeshTracker:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
         self._recenter_needed = True
         self._is_first_sample = True
+        self._yunet_raw_y_smooth = None
         self._clamped_at_min_count = 0
         self._clamped_at_max_count = 0
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
@@ -231,8 +233,8 @@ class FaceMeshTracker:
 
         elif self._yunet is not None:
             try:
-                # Ultra-fast downscale: optimal 160x120 for 60+ FPS real-time inference on Raspberry Pi
-                net_w, net_h = 160, 120
+                # YuNet at native 320x240 capture resolution with 4-thread acceleration
+                net_w, net_h = 320, 240
                 if w != net_w or h != net_h:
                     detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
                     scale_to_orig_x = w / float(net_w)
@@ -268,7 +270,17 @@ class FaceMeshTracker:
 
                     # Anatomical mid-face anchor matching MediaPipe: glabella (eye midpoint) + nose tip
                     glabella_y = 0.5 * (re_y + le_y)
-                    raw_y = float((0.55 * nose_y + 0.45 * glabella_y) / h)
+                    instant_raw_y = float((0.55 * nose_y + 0.45 * glabella_y) / h)
+
+                    # Smooth out single-shot detector sub-pixel jitter
+                    if self._yunet_raw_y_smooth is None or self._is_first_sample:
+                        self._yunet_raw_y_smooth = instant_raw_y
+                    else:
+                        noise_diff = abs(instant_raw_y - self._yunet_raw_y_smooth)
+                        # Adaptive filter: heavy smoothing for micro-jitter, responsive for deliberate movement
+                        filter_alpha = 0.28 if noise_diff < 0.015 else min(0.70, 0.28 + noise_diff * 3.5)
+                        self._yunet_raw_y_smooth = filter_alpha * instant_raw_y + (1.0 - filter_alpha) * self._yunet_raw_y_smooth
+                    raw_y = self._yunet_raw_y_smooth
 
                     # 1. Render futuristic facial contour wireframe (oval of cyan dots)
                     cx_p = int((fx + fw * 0.5) * scale_x)
@@ -305,8 +317,8 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("OpenCV YuNet process exception: %s", exc)
 
-        # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur or platforms without mp.solutions)
-        if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
+        # Fallback to OpenCV Haar Cascade ONLY if neither MediaPipe nor YuNet is available
+        if not raw_face_detected and self._face_mesh is None and self._yunet is None and self._cascade is not None and not self._cascade.empty():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Downscale only if frame width > 360 to keep speed high while preserving face detail
             if w > 360:
@@ -481,21 +493,14 @@ class FaceMeshTracker:
             else:
                 diff = abs(mapped_y - self._smoothed_y)
                 alpha_boost = min(1.0, (diff / 0.15) ** 1.3)
-                effective_alpha = base_alpha + (0.65 - base_alpha) * alpha_boost
+                effective_alpha = base_alpha + (0.45 - base_alpha) * alpha_boost
                 self._smoothed_y = (effective_alpha * mapped_y) + ((1.0 - effective_alpha) * self._smoothed_y)
 
         else:
-            # Grace period (0.35s): maintains smooth tracking during momentary blinks / motion blur
-            if (now - self._last_valid_detection_time) < 0.35 and not self._is_first_sample:
+            # Grace period (0.45s): maintains smooth tracking during momentary blinks / motion blur
+            if (now - self._last_valid_detection_time) < 0.45 and not self._is_first_sample:
                 effective_detected = True
-                # Inertial coasting during momentary detector drop prevents freezing/stuck paddle
-                if abs(self._velocity_y) > 0.05:
-                    span = max(0.01, (self._max_y_bound - self._min_y_bound))
-                    dt_grace = max(0.001, now - self._last_raw_y_sample_time)
-                    delta_norm = (self._velocity_y * dt_grace) / span
-                    self._smoothed_y = float(np.clip(self._smoothed_y + delta_norm * 0.35, 0.0, 1.0))
-                    self._velocity_y *= 0.80
-
+                # Hold last valid smoothed position steadily (avoids phantom velocity drift/jerks)
                 cv2.putText(
                     hud_frame,
                     "TRACKING: HOLD",
@@ -509,6 +514,7 @@ class FaceMeshTracker:
             else:
                 effective_detected = False
                 self._velocity_y = 0.0
+                self._yunet_raw_y_smooth = None
                 cv2.putText(
                     hud_frame,
                     "NO FACE DETECTED",
