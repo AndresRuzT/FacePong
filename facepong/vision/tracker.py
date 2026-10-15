@@ -230,18 +230,40 @@ class FaceMeshTracker:
 
         elif self._yunet is not None:
             try:
-                self._yunet.setInputSize((w, h))
-                _, faces = self._yunet.detect(frame)
+                # Fast downscale: ensure neural net operates at optimal 320x240 for 30+ FPS on Raspberry Pi
+                net_w, net_h = 320, 240
+                if w != net_w or h != net_h:
+                    detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
+                    scale_to_orig_x = w / float(net_w)
+                    scale_to_orig_y = h / float(net_h)
+                else:
+                    detect_frame = frame
+                    scale_to_orig_x = 1.0
+                    scale_to_orig_y = 1.0
+
+                if getattr(self, "_yunet_cur_size", None) != (net_w, net_h):
+                    self._yunet.setInputSize((net_w, net_h))
+                    self._yunet_cur_size = (net_w, net_h)
+
+                _, faces = self._yunet.detect(detect_frame)
                 if faces is not None and len(faces) > 0:
                     raw_face_detected = True
                     # Pick largest detected face
                     best_face = max(faces, key=lambda f: f[2] * f[3])
-                    fx, fy, fw, fh = best_face[0:4]
-                    re_x, re_y = best_face[4], best_face[5]
-                    le_x, le_y = best_face[6], best_face[7]
-                    nose_x, nose_y = best_face[8], best_face[9]
-                    rm_x, rm_y = best_face[10], best_face[11]
-                    lm_x, lm_y = best_face[12], best_face[13]
+                    fx = float(best_face[0] * scale_to_orig_x)
+                    fy = float(best_face[1] * scale_to_orig_y)
+                    fw = float(best_face[2] * scale_to_orig_x)
+                    fh = float(best_face[3] * scale_to_orig_y)
+                    re_x = float(best_face[4] * scale_to_orig_x)
+                    re_y = float(best_face[5] * scale_to_orig_y)
+                    le_x = float(best_face[6] * scale_to_orig_x)
+                    le_y = float(best_face[7] * scale_to_orig_y)
+                    nose_x = float(best_face[8] * scale_to_orig_x)
+                    nose_y = float(best_face[9] * scale_to_orig_y)
+                    rm_x = float(best_face[10] * scale_to_orig_x)
+                    rm_y = float(best_face[11] * scale_to_orig_y)
+                    lm_x = float(best_face[12] * scale_to_orig_x)
+                    lm_y = float(best_face[13] * scale_to_orig_y)
 
                     # Anatomical mid-face anchor matching MediaPipe: glabella (eye midpoint) + nose tip
                     glabella_y = 0.5 * (re_y + le_y)

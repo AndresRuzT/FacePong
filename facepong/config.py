@@ -17,8 +17,8 @@ class DisplayConfig:
 @dataclass(frozen=True)
 class CameraConfig:
     device_index: Optional[int] = None
-    capture_width: int = 640
-    capture_height: int = 480
+    capture_width: int = 320
+    capture_height: int = 240
     target_fps: int = 30
     preview_width: int = 192
     preview_height: int = 144
