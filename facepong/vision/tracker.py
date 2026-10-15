@@ -80,25 +80,50 @@ class FaceMeshTracker:
 
         # Detectors
         self._face_mesh = None
+        self._face_landmarker = None
         self._cascade = None
         self._init_detector()
 
     def _init_detector(self) -> None:
-        """Initializes MediaPipe Face Mesh AND OpenCV Haar Cascade as complementary detectors."""
+        """Initializes MediaPipe Face Mesh (Solutions or Tasks API) AND OpenCV Haar Cascade as fallback."""
+        # 1. MediaPipe Solutions API (legacy mediapipe, e.g. Python <= 3.12)
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                # Lower detection threshold to 0.35 allows robust recognition at greater distances and varied lighting on Raspberry Pi
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                     max_num_faces=1,
                     refine_landmarks=False,  # Higher FPS on Raspberry Pi
                     min_detection_confidence=0.35,
                     min_tracking_confidence=0.35,
                 )
-                logger.info("MediaPipe Face Mesh tracker initialized (fast-motion resilient)")
+                logger.info("MediaPipe Face Mesh tracker initialized (Solutions API)")
         except Exception as exc:
-            logger.warning("MediaPipe initialization failed (%s).", exc)
+            logger.debug("MediaPipe Solutions initialization failed (%s).", exc)
 
-        # Initialize OpenCV Cascade as primary/complementary detector
+        # 2. MediaPipe Tasks API (modern mediapipe >= 0.10.31 / 1.0+, Python 3.13 on Raspberry Pi)
+        if self._face_mesh is None:
+            try:
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                task_path = os.path.join(current_dir, "face_landmarker.task")
+                if os.path.exists(task_path) and hasattr(mp, "tasks"):
+                    from mediapipe.tasks import python
+                    from mediapipe.tasks.python import vision
+                    base_options = python.BaseOptions(model_asset_path=task_path)
+                    options = vision.FaceLandmarkerOptions(
+                        base_options=base_options,
+                        output_face_blendshapes=False,
+                        output_facial_transformation_matrixes=False,
+                        num_faces=1,
+                        min_face_detection_confidence=0.35,
+                        min_face_presence_confidence=0.35,
+                        min_tracking_confidence=0.35,
+                        running_mode=vision.RunningMode.IMAGE,
+                    )
+                    self._face_landmarker = vision.FaceLandmarker.create_from_options(options)
+                    logger.info("MediaPipe FaceLandmarker tracker initialized (Tasks API from %s)", task_path)
+            except Exception as exc:
+                logger.warning("MediaPipe Tasks initialization failed: %s", exc)
+
+        # 3. Initialize OpenCV Cascade as fallback detector
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             bundled_path = os.path.join(current_dir, "haarcascade_frontalface_default.xml")
@@ -115,8 +140,8 @@ class FaceMeshTracker:
         except Exception as exc:
             logger.warning("OpenCV Cascade initialization error: %s", exc)
 
-        if self._face_mesh is None and self._cascade is None:
-            logger.error("No face tracking backend available! Neither MediaPipe Face Mesh nor OpenCV Haar Cascade could be loaded.")
+        if self._face_mesh is None and self._face_landmarker is None and self._cascade is None:
+            logger.error("No face tracking backend available! Neither MediaPipe nor OpenCV Haar Cascade could be loaded.")
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
@@ -165,6 +190,7 @@ class FaceMeshTracker:
         scale_x = preview_w / float(w)
         scale_y = preview_h / float(h)
 
+        landmarks = None
         if self._face_mesh is not None:
             try:
                 # Set writeable=False to allow MediaPipe to pass frame by reference without memory copy
@@ -172,41 +198,51 @@ class FaceMeshTracker:
                 results = self._face_mesh.process(rgb_frame)
                 rgb_frame.flags.writeable = True
                 if results and results.multi_face_landmarks:
-                    raw_face_detected = True
                     landmarks = results.multi_face_landmarks[0].landmark
-                    nose_point = landmarks[NOSE_TIP_IDX]
-                    glabella_point = landmarks[GLABELLA_IDX]
-                    # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
-                    raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
-
-                    # Render futuristic landmarks onto HUD preview
-                    nose_px = int(nose_point.x * preview_w)
-                    nose_py = int(nose_point.y * preview_h)
-
-                    for idx in CONTOUR_KEYPOINTS:
-                        pt = landmarks[idx]
-                        cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 1, (0, 180, 255), -1)
-
-                    for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
-                        pt = landmarks[idx]
-                        cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 2, (255, 0, 180), -1)
-
-                    cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
-                    cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
-                    cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
-
-                    cv2.putText(
-                        hud_frame,
-                        "TRACKING: LOCKED",
-                        (8, preview_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.35,
-                        (0, 255, 180),
-                        1,
-                        cv2.LINE_AA,
-                    )
             except Exception as exc:
                 logger.debug("MediaPipe Face Mesh process exception: %s", exc)
+        elif self._face_landmarker is not None:
+            try:
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                results = self._face_landmarker.detect(mp_image)
+                if results and results.face_landmarks and len(results.face_landmarks) > 0:
+                    landmarks = results.face_landmarks[0]
+            except Exception as exc:
+                logger.debug("MediaPipe FaceLandmarker process exception: %s", exc)
+
+        if landmarks is not None:
+            raw_face_detected = True
+            nose_point = landmarks[NOSE_TIP_IDX]
+            glabella_point = landmarks[GLABELLA_IDX]
+            # Combined anatomical mid-face anchor: stable against mouth movement, yaw, and nodding
+            raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
+
+            # Render futuristic landmarks onto HUD preview
+            nose_px = int(nose_point.x * preview_w)
+            nose_py = int(nose_point.y * preview_h)
+
+            for idx in CONTOUR_KEYPOINTS:
+                pt = landmarks[idx]
+                cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 1, (0, 180, 255), -1)
+
+            for idx in (LEFT_EYE_IDX, RIGHT_EYE_IDX, CHIN_IDX, FOREHEAD_IDX):
+                pt = landmarks[idx]
+                cv2.circle(hud_frame, (int(pt.x * preview_w), int(pt.y * preview_h)), 2, (255, 0, 180), -1)
+
+            cv2.circle(hud_frame, (nose_px, nose_py), 6, (0, 255, 200), 1, cv2.LINE_AA)
+            cv2.line(hud_frame, (nose_px - 10, nose_py), (nose_px + 10, nose_py), (0, 255, 200), 1)
+            cv2.line(hud_frame, (nose_px, nose_py - 10), (nose_px, nose_py + 10), (0, 255, 200), 1)
+
+            cv2.putText(
+                hud_frame,
+                "TRACKING: LOCKED",
+                (8, preview_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (0, 255, 180),
+                1,
+                cv2.LINE_AA,
+            )
 
         # Fallback to OpenCV Haar Cascade if MediaPipe missed this frame (e.g. motion blur or platforms without mp.solutions)
         if not raw_face_detected and self._cascade is not None and not self._cascade.empty():
@@ -431,6 +467,9 @@ class FaceMeshTracker:
         if self._face_mesh is not None:
             self._face_mesh.close()
             self._face_mesh = None
+        if self._face_landmarker is not None:
+            self._face_landmarker.close()
+            self._face_landmarker = None
 
 
 class VisionPipeline:
