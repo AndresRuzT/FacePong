@@ -110,6 +110,9 @@ class NeonRenderer:
             self._trail_surfs.append((r, t_surf))
 
         self._particle_cache = {}
+        self._cached_pip_surface: Optional[pygame.Surface] = None
+        self._cached_pip_id: Optional[int] = None
+        self._cached_pip_size: Optional[Tuple[int, int]] = None
 
     def update_geometry(self, screen: pygame.Surface, arena_rect: pygame.Rect) -> None:
         """Adapts renderer to new window dimensions."""
@@ -364,11 +367,17 @@ class NeonRenderer:
 
         if tracking_state.preview_surface_buffer is not None:
             raw_rgb = tracking_state.preview_surface_buffer
-            cam_surface = pygame.image.frombuffer(raw_rgb.tobytes(), (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
-            # Fast nearest-neighbor hardware scale for high FPS on Raspberry Pi
-            scaled_cam = pygame.transform.scale(cam_surface, (pw - 4, ph - 22))
-            self.screen.blit(scaled_cam, (px + 2, py + 2))
+            buf_id = id(raw_rgb)
+            target_size = (pw - 4, ph - 22)
+            if self._cached_pip_id != buf_id or self._cached_pip_size != target_size:
+                cam_surface = pygame.image.frombuffer(raw_rgb.tobytes(), (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
+                self._cached_pip_surface = pygame.transform.scale(cam_surface, target_size)
+                self._cached_pip_id = buf_id
+                self._cached_pip_size = target_size
+            if self._cached_pip_surface is not None:
+                self.screen.blit(self._cached_pip_surface, (px + 2, py + 2))
         else:
+            self._cached_pip_id = None
             placeholder = pygame.Surface((pw - 4, ph - 22))
             placeholder.fill((20, 24, 38))
             self.screen.blit(placeholder, (px + 2, py + 2))

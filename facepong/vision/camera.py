@@ -353,8 +353,9 @@ class ThreadedCamera:
                     self._attempt_reconnect()
 
             elapsed = time.perf_counter() - loop_start
-            sleep_time = max(0.001, frame_interval - elapsed)
-            time.sleep(sleep_time)
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0.001:
+                time.sleep(sleep_time)
 
     def _generate_synthetic_frame(self) -> np.ndarray:
         """Generates a mock video frame when physical camera is unavailable."""
