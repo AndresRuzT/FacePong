@@ -28,7 +28,7 @@ class CameraConfig:
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
     head_sensitivity: float = 2.4
     # Calibration range spread around neutral head Y
-    default_range_spread: float = 0.14
+    default_range_spread: float = 0.12
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head range normalization defaults (fraction of frame height)
