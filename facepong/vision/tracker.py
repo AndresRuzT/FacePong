@@ -194,38 +194,37 @@ class FaceMeshTracker:
         return self.device_profile
 
     def _init_detector(self) -> None:
-        """Initializes MediaPipe Face Mesh OR OpenCV YuNet Deep Neural Network as primary detectors."""
-        # 1. MediaPipe Solutions FaceMesh (laptop / environments with solutions API)
+        """Initializes MediaPipe Face Mesh (multi-face) and OpenCV YuNet DNN."""
+        # 1. MediaPipe Solutions FaceMesh (high-precision multi-face landmarks)
         try:
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                    max_num_faces=1,
+                    max_num_faces=4,
                     refine_landmarks=False,
-                    min_detection_confidence=0.35,
-                    min_tracking_confidence=0.35,
+                    min_detection_confidence=0.25,
+                    min_tracking_confidence=0.25,
                 )
-                logger.info("MediaPipe Face Mesh tracker initialized (Solutions API)")
+                logger.info("MediaPipe Face Mesh tracker initialized (Multi-face max=4)")
         except Exception as exc:
             logger.debug("MediaPipe Solutions initialization failed (%s).", exc)
 
-        # 2. OpenCV YuNet Deep Neural Network Face & Landmark Detector (Raspberry Pi & edge devices)
-        if self._face_mesh is None:
-            try:
-                cv2.setNumThreads(4)
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                yunet_path = os.path.join(current_dir, "face_detection_yunet_2023mar.onnx")
-                if os.path.exists(yunet_path) and hasattr(cv2, "FaceDetectorYN"):
-                    self._yunet = cv2.FaceDetectorYN.create(
-                        model=yunet_path,
-                        config="",
-                        input_size=(160, 120),
-                        score_threshold=0.3,
-                        nms_threshold=0.3,
-                        top_k=5,
-                    )
-                    logger.info("OpenCV YuNet DNN tracker initialized (ROI 2-phase, 4 threads): %s", yunet_path)
-            except Exception as exc:
-                logger.warning("OpenCV YuNet initialization failed: %s", exc)
+        # 2. OpenCV YuNet Deep Neural Network Face & Landmark Detector
+        try:
+            cv2.setNumThreads(4)
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            yunet_path = os.path.join(current_dir, "face_detection_yunet_2023mar.onnx")
+            if os.path.exists(yunet_path) and hasattr(cv2, "FaceDetectorYN"):
+                self._yunet = cv2.FaceDetectorYN.create(
+                    model=yunet_path,
+                    config="",
+                    input_size=(320, 240),
+                    score_threshold=0.20,
+                    nms_threshold=0.3,
+                    top_k=10,
+                )
+                logger.info("OpenCV YuNet DNN tracker initialized (320x240, 4 threads): %s", yunet_path)
+        except Exception as exc:
+            logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
         # 3. OpenCV Haar Cascade as emergency fallback
         try:
@@ -414,22 +413,15 @@ class FaceMeshTracker:
 
         faces: List[dict] = []
 
-        # ─── 1. YuNet Multi-Face Detection (Preferred edge path) ───
-        if self._yunet is not None:
-            try:
-                faces = self._yunet_detect_multi(frame, w, h)
-            except Exception as exc:
-                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
-
-        # ─── 2. MediaPipe Face Mesh fallback ───
-        elif self._face_mesh is not None:
+        # ─── 1. MediaPipe Face Mesh (High-precision 3D landmarks for multi-face) ───
+        if self._face_mesh is not None:
             try:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb_frame.flags.writeable = False
                 results = self._face_mesh.process(rgb_frame)
                 rgb_frame.flags.writeable = True
                 if results and results.multi_face_landmarks:
-                    for fl in results.multi_face_landmarks[:2]:
+                    for fl in results.multi_face_landmarks:
                         landmarks = fl.landmark
                         nose = landmarks[NOSE_TIP_IDX]
                         glabella = landmarks[GLABELLA_IDX]
@@ -444,12 +436,20 @@ class FaceMeshTracker:
                             "fw": det_fw, "fh": det_fh,
                             "nose_x": nose.x * w, "nose_y": nose.y * h,
                         })
-                    faces.sort(key=lambda f: f["center_x"])
             except Exception as exc:
                 logger.debug("MediaPipe multi-face exception: %s", exc)
 
+        # ─── 2. OpenCV YuNet DNN (Runs if MediaPipe absent, or if MediaPipe saw < 2 faces) ───
+        if len(faces) < 2 and self._yunet is not None:
+            try:
+                yn_faces = self._yunet_detect_multi(frame, w, h)
+                if len(yn_faces) > len(faces):
+                    faces = yn_faces
+            except Exception as exc:
+                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
+
         # ─── 3. Haar Cascade fallback ───
-        elif self._cascade is not None and not self._cascade.empty():
+        if not faces and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
                 faces.append({
@@ -458,6 +458,14 @@ class FaceMeshTracker:
                     "fx": fx, "fy": fy, "fw": fw, "fh": fh,
                     "nose_x": fx + fw * 0.5, "nose_y": fy + fh * 0.5,
                 })
+
+        # Keep the 2 largest faces (filters out any small background passersby)
+        if len(faces) > 2:
+            faces.sort(key=lambda f: f["fw"] * f["fh"], reverse=True)
+            faces = faces[:2]
+
+        # Horizontal partition: Leftmost face = Player 1 (Cyan), Rightmost face = Player 2 (Crimson)
+        faces.sort(key=lambda f: f["center_x"])
 
         self.face_count = len(faces)
         self.is_pvp = (self.face_count >= 2)
@@ -504,7 +512,8 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Filters background bystanders and returns sorted face list (leftmost first).
         """
-        net_w, net_h = 160, 120
+        # Run detection at 320x240 for optimal multi-face resolution and sensitive capture
+        net_w, net_h = 320, 240
         if w != net_w or h != net_h:
             detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
             detect_scale_x = w / float(net_w)
@@ -522,12 +531,16 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.35:
+            if score < 0.20:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
             fw = float(face[2] * detect_scale_x)
             fh = float(face[3] * detect_scale_y)
+
+            # Minimum size threshold: face must be at least 16px
+            if fh < 16 or fw < 16:
+                continue
 
             # Key landmarks
             re_x = float(face[4] * detect_scale_x)
@@ -557,11 +570,6 @@ class FaceMeshTracker:
                 "rm_x": rm_x, "rm_y": rm_y, "lm_x": lm_x, "lm_y": lm_y,
                 "score": score,
             })
-
-        # Discard background spectators: filter faces with area < 0.25 * max_area
-        if results:
-            max_area = max(f["fw"] * f["fh"] for f in results)
-            results = [f for f in results if (f["fw"] * f["fh"]) >= 0.25 * max_area]
 
         # Sort horizontally: leftmost is first, rightmost is last
         results.sort(key=lambda f: f["center_x"])

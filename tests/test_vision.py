@@ -138,6 +138,26 @@ class TestVisionTracker(unittest.TestCase):
         self.assertAlmostEqual(state.p1_smoothed_y, 0.5)
         self.assertAlmostEqual(state.p2_smoothed_y, 0.5)
 
+    def test_multi_face_detection_sets_pvp(self):
+        tracker = FaceMeshTracker(self.config)
+        # Mock _face_mesh or _yunet returning 2 faces
+        sample_faces = [
+            {"raw_y": 0.45, "center_x": 80.0, "fx": 60.0, "fy": 80.0, "fw": 40.0, "fh": 50.0, "nose_x": 80.0, "nose_y": 105.0},
+            {"raw_y": 0.55, "center_x": 240.0, "fx": 220.0, "fy": 85.0, "fw": 40.0, "fh": 50.0, "nose_x": 240.0, "nose_y": 110.0},
+        ]
+        tracker._yunet_detect_multi = lambda frame, w, h: sample_faces
+        tracker._face_mesh = None  # Force YuNet path
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        det, ry, sy, hud = tracker.process_frame(frame)
+
+        self.assertTrue(det)
+        self.assertEqual(tracker.face_count, 2)
+        self.assertTrue(tracker.is_pvp)
+        self.assertTrue(tracker.p1_detected)
+        self.assertTrue(tracker.p2_detected)
+        self.assertAlmostEqual(tracker.p1_raw_y, 0.45)
+        self.assertAlmostEqual(tracker.p2_raw_y, 0.55)
+
 
 if __name__ == "__main__":
     unittest.main()
