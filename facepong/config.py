@@ -33,11 +33,11 @@ class CameraConfig:
     flip_horizontal: bool = True
     device_profile: DeviceProfile = DeviceProfile.AUTO
     # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
-    ema_alpha: float = 0.25
+    ema_alpha: float = 0.30
     # Sensitivity multiplier: higher = less head motion needed to move paddle across court
-    head_sensitivity: float = 2.4
+    head_sensitivity: float = 2.8
     # Calibration range spread around neutral head Y
-    default_range_spread: float = 0.12
+    default_range_spread: float = 0.10
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head range normalization defaults (fraction of frame height)

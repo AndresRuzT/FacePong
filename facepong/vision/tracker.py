@@ -97,8 +97,8 @@ class FaceMeshTracker:
         self._is_first_sample: bool = True
 
         # Sensitivity-aware calibration bounds
-        sensitivity = max(0.5, getattr(config, "head_sensitivity", 2.4))
-        base_spread = getattr(config, "default_range_spread", 0.18)
+        sensitivity = max(0.5, getattr(config, "head_sensitivity", 2.8))
+        base_spread = getattr(config, "default_range_spread", 0.14)
         initial_spread = base_spread / (sensitivity ** 0.6)
         self._min_y_bound: float = max(0.02, 0.5 - initial_spread)
         self._max_y_bound: float = min(0.98, 0.5 + initial_spread)
@@ -141,31 +141,31 @@ class FaceMeshTracker:
     def get_effective_range_spread(self, face_height_fraction: Optional[float] = None) -> float:
         """
         Calculates optimal head motion spread standardized across device classes:
-          - TV: player is 1.5-3m away on a large display -> tight spread (~0.060), high sensitivity
-          - LAPTOP: player is ~50cm away at desk -> standard spread (~0.105), stable control
-          - TABLET: player is ~35cm away, close-up -> wide spread (~0.145), gentle control
+          - TV: player is 1.5-3m away on a large display -> ultra-responsive spread (~0.046)
+          - LAPTOP: player is ~50cm away at desk -> balanced responsive spread (~0.078)
+          - TABLET: player is ~35cm away, close-up -> gentle spread (~0.110)
           - AUTO: detects screen resolution and scales inversely with physical distance (face size)
         """
         if self.device_profile == DeviceProfile.TV:
-            base_spread = 0.060
+            base_spread = 0.046
         elif self.device_profile == DeviceProfile.LAPTOP:
-            base_spread = 0.105
+            base_spread = 0.078
         elif self.device_profile == DeviceProfile.TABLET:
-            base_spread = 0.145
+            base_spread = 0.110
         else:
             # AUTO profile:
             # TVs / large displays are >= 1000px height
             if self._screen_height >= 1000:
-                base_spread = 0.068
+                base_spread = 0.052
             else:
-                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
-                config_spread = getattr(self.config, "default_range_spread", 0.18)
+                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.8))
+                config_spread = getattr(self.config, "default_range_spread", 0.14)
                 base_spread = config_spread / (sensitivity ** 0.6)
 
         # Distance normalization: face size is inversely proportional to player distance
         if face_height_fraction is not None and face_height_fraction > 0.04:
-            ref_scale = 0.26  # reference face height fraction at 50cm laptop desk
-            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.45, 1.55))
+            ref_scale = 0.22  # reference face height fraction
+            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.50, 1.40))
             return float(base_spread * dist_multiplier)
 
         return float(base_spread)
@@ -173,12 +173,12 @@ class FaceMeshTracker:
     def get_effective_ema_alpha(self) -> float:
         """Returns baseline EMA smoothing factor tuned for device ergonomics."""
         if self.device_profile == DeviceProfile.TV:
-            return 0.32
+            return 0.38
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.26
+            return 0.32
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.22
-        return getattr(self.config, "ema_alpha", 0.28)
+            return 0.26
+        return getattr(self.config, "ema_alpha", 0.32)
 
     def cycle_device_profile(self) -> DeviceProfile:
         """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
@@ -351,21 +351,21 @@ class FaceMeshTracker:
         # Map to linear [0.0, 1.0]
         linear_y = float(np.clip((raw_y - min_b) / span, 0.0, 1.0))
 
-        # Progressive sensitivity curve
+        # Progressive sensitivity curve (direct, responsive center without deadzone)
         u = 2.0 * (linear_y - 0.5)
         abs_u = abs(u)
         sign_u = 1.0 if u >= 0 else -1.0
-        curved_u = sign_u * (0.65 * abs_u + 0.35 * (abs_u ** 1.35))
+        curved_u = sign_u * (0.85 * abs_u + 0.15 * (abs_u ** 1.15))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
-        # Single-pass adaptive EMA smoothing
+        # Single-pass adaptive EMA smoothing (reacts quickly to gentle head nods)
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.12) ** 1.2)
-            eff_alpha = base_alpha + (0.55 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.09) ** 1.1)
+            eff_alpha = base_alpha + (0.68 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
