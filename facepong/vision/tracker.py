@@ -329,10 +329,12 @@ class FaceMeshTracker:
 
         # Baseline drift if clamped at edge
         span = max(0.01, max_b - min_b)
+        mid_b = 0.5 * (min_b + max_b)
+
         if raw_y > max_b:
             c_max += 1
-            if c_max > 12:
-                drift = (raw_y - max_b) * 0.12
+            if c_max > 8:
+                drift = (raw_y - max_b) * 0.15
                 max_b += drift
                 min_b += drift
         else:
@@ -340,15 +342,27 @@ class FaceMeshTracker:
 
         if raw_y < min_b:
             c_min += 1
-            if c_min > 12:
-                drift = (raw_y - min_b) * 0.12
+            if c_min > 8:
+                drift = (raw_y - min_b) * 0.15
                 min_b += drift
                 max_b += drift
         else:
             c_min = 0
 
-        # Map to linear [0.0, 1.0]
-        linear_y = float(np.clip((raw_y - min_b) / span, 0.0, 1.0))
+        # Asymmetric pitch mapping:
+        # Looking down produces ~35% less physical pixel shift on camera due to the skull pivot axis.
+        # Asymmetric spans ensure looking up is smooth and controlled, while looking down reaches
+        # the bottom of the arena with a natural, subtle downward nod without straining the neck.
+        if raw_y <= mid_b:
+            # Looking UP: slightly wider range (1.15x) so it doesn't feel overly sensitive or twitchy
+            half_span_up = max(0.01, (mid_b - min_b) * 1.15)
+            norm = min(1.0, max(0.0, (mid_b - raw_y) / half_span_up))
+            linear_y = 0.5 - 0.5 * norm
+        else:
+            # Looking DOWN: tighter range (0.68x) so looking down is fast, responsive, and effortless
+            half_span_down = max(0.01, (max_b - mid_b) * 0.68)
+            norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
+            linear_y = 0.5 + 0.5 * norm
 
         # Progressive sensitivity curve (direct, responsive center without deadzone)
         u = 2.0 * (linear_y - 0.5)
@@ -413,8 +427,15 @@ class FaceMeshTracker:
 
         faces: List[dict] = []
 
-        # ─── 1. MediaPipe Face Mesh (High-precision 3D landmarks for multi-face) ───
-        if self._face_mesh is not None:
+        # ─── 1. OpenCV YuNet DNN (Ultra-fast, zero-drop single-pass multi-face detector) ───
+        if self._yunet is not None:
+            try:
+                faces = self._yunet_detect_multi(frame, w, h)
+            except Exception as exc:
+                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
+
+        # ─── 2. MediaPipe Face Mesh fallback (Runs if YuNet absent or found 0 faces) ───
+        if not faces and self._face_mesh is not None:
             try:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb_frame.flags.writeable = False
@@ -425,7 +446,7 @@ class FaceMeshTracker:
                         landmarks = fl.landmark
                         nose = landmarks[NOSE_TIP_IDX]
                         glabella = landmarks[GLABELLA_IDX]
-                        ry = float(0.55 * nose.y + 0.45 * glabella.y)
+                        ry = float(0.65 * nose.y + 0.35 * glabella.y)
                         det_fh = abs(landmarks[152].y - landmarks[10].y) * h
                         det_fw = abs(landmarks[454].x - landmarks[234].x) * w
                         faces.append({
@@ -439,15 +460,6 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("MediaPipe multi-face exception: %s", exc)
 
-        # ─── 2. OpenCV YuNet DNN (Runs if MediaPipe absent, or if MediaPipe saw < 2 faces) ───
-        if len(faces) < 2 and self._yunet is not None:
-            try:
-                yn_faces = self._yunet_detect_multi(frame, w, h)
-                if len(yn_faces) > len(faces):
-                    faces = yn_faces
-            except Exception as exc:
-                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
-
         # ─── 3. Haar Cascade fallback ───
         if not faces and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
@@ -459,19 +471,34 @@ class FaceMeshTracker:
                     "nose_x": fx + fw * 0.5, "nose_y": fy + fh * 0.5,
                 })
 
-        # Keep the 2 largest faces (filters out any small background passersby)
-        if len(faces) > 2:
-            faces.sort(key=lambda f: f["fw"] * f["fh"], reverse=True)
-            faces = faces[:2]
+        # Filter out tiny noise (faces < 16px)
+        faces = [f for f in faces if f.get("fh", 20) >= 16 and f.get("fw", 20) >= 16]
 
-        # Horizontal partition: Leftmost face = Player 1 (Cyan), Rightmost face = Player 2 (Crimson)
-        faces.sort(key=lambda f: f["center_x"])
+        # Robust independent spatial binning: Left (P1) vs Right (P2)
+        # Guarantees Player 2's paddle updates at full FPS without interference or lag from Player 1
+        mid_x = w * 0.5
+        p1_candidates = [f for f in faces if f["center_x"] < mid_x]
+        p2_candidates = [f for f in faces if f["center_x"] >= mid_x]
 
-        self.face_count = len(faces)
+        if p1_candidates and p2_candidates:
+            p1_face = max(p1_candidates, key=lambda f: f["fw"] * f["fh"])
+            p2_face = max(p2_candidates, key=lambda f: f["fw"] * f["fh"])
+        elif len(faces) >= 2:
+            # Both players are slightly on one side: sort horizontally
+            faces.sort(key=lambda f: f["center_x"])
+            p1_face = faces[0]
+            p2_face = faces[1]
+        elif len(faces) == 1:
+            # Solo player: can be anywhere in frame
+            p1_face = faces[0]
+            p2_face = None
+        else:
+            p1_face = None
+            p2_face = None
+
+        active_count = (1 if p1_face is not None else 0) + (1 if p2_face is not None else 0)
+        self.face_count = active_count
         self.is_pvp = (self.face_count >= 2)
-
-        p1_face = faces[0] if len(faces) >= 1 else None
-        p2_face = faces[1] if len(faces) >= 2 else None
 
         # Update Player 1 state
         if p1_face is not None:
@@ -554,10 +581,10 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # Mid-face anatomical anchor
+            # Mid-face anatomical anchor weighted towards nose tip for responsive downward pitch
             glabella_y = 0.5 * (re_y + le_y)
             face_center_y = fy + fh * 0.5
-            anchor_y = 0.40 * glabella_y + 0.35 * face_center_y + 0.25 * nose_y
+            anchor_y = 0.55 * nose_y + 0.25 * glabella_y + 0.20 * face_center_y
             raw_y = float(anchor_y / h)
             center_x = fx + fw * 0.5
 
