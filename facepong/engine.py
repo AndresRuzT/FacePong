@@ -55,6 +55,7 @@ class GameEngine:
         self.state_mgr = GameStateManager(
             winning_score=config.physics.winning_score,
             inactivity_timeout_sec=config.camera.inactivity_timeout_sec,
+            solo_start_delay_sec=getattr(config.camera, "solo_start_delay_sec", 15.0),
         )
         self.ai = AdaptiveAIController(
             config.ai,
@@ -97,6 +98,8 @@ class GameEngine:
 
         # Keyboard override tracker
         self._keyboard_active = False
+        self._keyboard_p1_active = False
+        self._keyboard_p2_active = False
 
         # State transition and calibration tracking
         self._previous_state = ExhibitionState.ATTRACT
@@ -183,32 +186,54 @@ class GameEngine:
                     logger.info("Player cycled device profile to: %s", new_prof.value)
                 elif event.key == pygame.K_SPACE:
                     if self.state_mgr.current_state == ExhibitionState.ATTRACT:
+                        tracking_state = self.vision.get_state()
+                        self.state_mgr.is_pvp = (tracking_state.face_count >= 2)
                         self.state_mgr.change_state(ExhibitionState.CALIBRATING)
                     elif self.state_mgr.current_state == ExhibitionState.GAME_OVER:
                         self.state_mgr.reset_to_attract()
 
-        # Keyboard paddle fallback (W/S or UP/DOWN)
+        # Keyboard paddle fallback (PvP: W/S for P1, UP/DOWN for P2; Solo: W/S or UP/DOWN for P1)
         keys = pygame.key.get_pressed()
-        move_dir = 0.0
-        if keys[pygame.K_w] or keys[pygame.K_UP]:
-            move_dir -= 1.0
-        if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-            move_dir += 1.0
+        if self.state_mgr.is_pvp:
+            p1_dir = 0.0
+            if keys[pygame.K_w]:
+                p1_dir -= 1.0
+            if keys[pygame.K_s]:
+                p1_dir += 1.0
+            if p1_dir != 0.0:
+                self._keyboard_p1_active = True
+                self.player_paddle.move_keyboard(p1_dir, dt)
 
-        if move_dir != 0.0:
-            self._keyboard_active = True
-            self.player_paddle.move_keyboard(move_dir, dt)
+            p2_dir = 0.0
+            if keys[pygame.K_UP]:
+                p2_dir -= 1.0
+            if keys[pygame.K_DOWN]:
+                p2_dir += 1.0
+            if p2_dir != 0.0:
+                self._keyboard_p2_active = True
+                self.ai_paddle.move_keyboard(p2_dir, dt)
+        else:
+            move_dir = 0.0
+            if keys[pygame.K_w] or keys[pygame.K_UP]:
+                move_dir -= 1.0
+            if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                move_dir += 1.0
+
+            if move_dir != 0.0:
+                self._keyboard_active = True
+                self.player_paddle.move_keyboard(move_dir, dt)
 
     def _update(self, dt: float) -> None:
         """Updates game state machine, physics, and entities."""
         tracking_state = self.vision.get_state()
         state = self.state_mgr.current_state
 
-        # Update presence watchdog
+        # Update presence watchdog with automatic face counting
         timed_out = self.state_mgr.update_watchdog(
             tracking_state.face_detected,
             tracking_state.last_detected_time,
             dt,
+            face_count=tracking_state.face_count,
         )
         if timed_out:
             logger.info("Match canceled due to player inactivity. Returning to attract mode.")
@@ -223,10 +248,16 @@ class GameEngine:
             self._calibration_progress = 0.0
         self._previous_state = state
 
-        # Update player paddle from face tracking during active gameplay
+        # Update player paddle(s) from face tracking during active gameplay
         if state == ExhibitionState.PLAYING:
-            if tracking_state.face_detected and not self._keyboard_active:
-                self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
+            if self.state_mgr.is_pvp:
+                if tracking_state.p1_detected and not self._keyboard_p1_active:
+                    self.player_paddle.set_target_normalized_y(tracking_state.p1_smoothed_y)
+                if tracking_state.p2_detected and not self._keyboard_p2_active:
+                    self.ai_paddle.set_target_normalized_y(tracking_state.p2_smoothed_y)
+            else:
+                if tracking_state.face_detected and not self._keyboard_active:
+                    self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
 
         # Update particle effects
         self.particles.update(dt)
@@ -298,18 +329,23 @@ class GameEngine:
             self.sound.play("start")
             self.state_mgr.change_state(ExhibitionState.PLAYING)
             self._keyboard_active = False
+            self._keyboard_p1_active = False
+            self._keyboard_p2_active = False
 
     def _update_playing_mode(self, dt: float) -> None:
         """Advances active competitive gameplay physics and collisions."""
         self.player_paddle.update(dt)
-        self.ai.update(
-            dt,
-            self.ball,
-            self.ai_paddle,
-            self.state_mgr.player_score,
-            self.state_mgr.ai_score,
-            self.state_mgr.rally_count,
-        )
+        if self.state_mgr.is_pvp:
+            self.ai_paddle.update(dt)
+        else:
+            self.ai.update(
+                dt,
+                self.ball,
+                self.ai_paddle,
+                self.state_mgr.player_score,
+                self.state_mgr.ai_score,
+                self.state_mgr.rally_count,
+            )
 
         bounced_wall, _ = self.ball.update(dt)
         if bounced_wall:
@@ -330,13 +366,14 @@ class GameEngine:
 
         # Goal Detection relative to arena frame
         if self.ball.x < self.arena_rect.left:
-            # AI Scored
+            # AI / Player 2 Scored
             self.particles.emit(self.arena_rect.left + 5, self.ball.y, self.config.colors.ai_primary, count=35, speed_range=(150.0, 450.0))
-            is_game_over = self.state_mgr.record_goal("AI")
+            scorer = "PLAYER 2" if self.state_mgr.is_pvp else "AI"
+            is_game_over = self.state_mgr.record_goal(scorer)
             self.sound.play("opponent_goal")
             self.renderer.trigger_goal_effect("AI")
             if is_game_over:
-                self.renderer.trigger_match_end("AI")
+                self.renderer.trigger_match_end(scorer)
                 self.state_mgr.change_state(ExhibitionState.GAME_OVER)
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
@@ -347,7 +384,7 @@ class GameEngine:
                 self.ai_paddle.target_y = center_y
 
         elif self.ball.x > self.arena_rect.right:
-            # Player Scored
+            # Player 1 Scored
             self.particles.emit(
                 self.arena_rect.right - 5,
                 self.ball.y,
@@ -355,11 +392,12 @@ class GameEngine:
                 count=35,
                 speed_range=(150.0, 450.0),
             )
-            is_game_over = self.state_mgr.record_goal("PLAYER")
+            scorer = "PLAYER 1" if self.state_mgr.is_pvp else "PLAYER"
+            is_game_over = self.state_mgr.record_goal(scorer)
             self.sound.play("goal")
             self.renderer.trigger_goal_effect("PLAYER")
             if is_game_over:
-                self.renderer.trigger_match_end("PLAYER")
+                self.renderer.trigger_match_end(scorer)
                 self.state_mgr.change_state(ExhibitionState.GAME_OVER)
             else:
                 self.state_mgr.change_state(ExhibitionState.POINT_SCORED)
@@ -415,6 +453,7 @@ class GameEngine:
             ai_difficulty=self.ai.difficulty_level,
             match_duration_sec=match_dur,
             rally_count=self.state_mgr.rally_count,
+            is_pvp=self.state_mgr.is_pvp,
         )
 
         # 4. Arena Entities
@@ -423,10 +462,10 @@ class GameEngine:
             self.renderer.render_paddle(self.ai_paddle, self.config.colors.ai_primary, self.config.colors.ai_glow)
             self.renderer.render_ball(self.ball)
             self.renderer.render_particles(self.particles)
-            self.screens.draw_attract_screen(tracking_state)
+            self.screens.draw_attract_screen(tracking_state, countdown_sec=self.state_mgr.attract_countdown_remaining)
 
         elif state == ExhibitionState.CALIBRATING:
-            self.screens.draw_calibration_screen(tracking_state, self._calibration_progress)
+            self.screens.draw_calibration_screen(tracking_state, self._calibration_progress, is_pvp=self.state_mgr.is_pvp)
 
         elif state in (ExhibitionState.PLAYING, ExhibitionState.POINT_SCORED):
             self.renderer.render_paddle(self.player_paddle, self.config.colors.player_primary, self.config.colors.player_glow)
@@ -444,7 +483,7 @@ class GameEngine:
                 self._render_debug_overlay()
 
         elif state == ExhibitionState.GAME_OVER:
-            if self.state_mgr.winner == "PLAYER" and random.random() < 0.22:
+            if self.state_mgr.winner in ("PLAYER", "PLAYER 1", "PLAYER 2") and random.random() < 0.22:
                 # Celebratory golden victory fireworks fountains
                 fx_x = random.choice([self.arena_rect.left + 35, self.arena_rect.right - 35, self.arena_rect.centerx])
                 self.particles.emit(fx_x, self.arena_rect.bottom - 12, (255, 215, 30), count=6, speed_range=(100.0, 300.0))

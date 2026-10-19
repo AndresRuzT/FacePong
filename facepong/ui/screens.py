@@ -25,7 +25,7 @@ class ScreenManager:
         self.renderer = renderer
         self.screen = renderer.screen
 
-    def draw_attract_screen(self, tracking_state: TrackingState) -> None:
+    def draw_attract_screen(self, tracking_state: TrackingState, countdown_sec: Optional[float] = None) -> None:
         """Renders a clean, retro-arcade attract display with minimal text and smooth pulse effects."""
         now = time.perf_counter()
         arena = self.renderer.arena_rect
@@ -62,58 +62,114 @@ class ScreenManager:
             int(self.colors.amber_accent[2] * (pulse_alpha / 255.0)),
         )
 
-        prompt_str = "►  MIRA A LA CÁMARA PARA JUGAR  ◄" if is_spanish else "►  LOOK AT THE CAMERA TO PLAY  ◄"
+        fc = getattr(tracking_state, "face_count", 1 if tracking_state.face_detected else 0)
+        if fc >= 2:
+            prompt_str = "► ¡2 JUGADORES DETECTADOS! • INICIANDO PvP... ◄" if is_spanish else "► 2 PLAYERS DETECTED • STARTING PvP... ◄"
+            kb_str = "[ ESPACIO: INICIAR PvP   •   P1 (IZQ) vs P2 (DER) ]" if is_spanish else "[ SPACE: START PvP   •   P1 (LEFT) vs P2 (RIGHT) ]"
+        elif fc == 1:
+            if countdown_sec is not None and countdown_sec > 0:
+                rem = max(1, math.ceil(countdown_sec))
+                prompt_str = f"► 1 JUGADOR • ESPERANDO 2DO JUGADOR ({rem}s) ◄" if is_spanish else f"► 1 PLAYER • WAITING FOR 2ND PLAYER ({rem}s) ◄"
+                kb_str = "[ ESPACIO: JUGAR YA VS IA   •   P1 (IZQ) vs P2 (DER) ]" if is_spanish else "[ SPACE: PLAY NOW VS AI   •   P1 (LEFT) vs P2 (RIGHT) ]"
+            else:
+                prompt_str = "► 1 JUGADOR DETECTADO • MIRA AL FRENTE PARA JUGAR ◄" if is_spanish else "► 1 PLAYER DETECTED • LOOK FORWARD TO PLAY ◄"
+                kb_str = "[ ESPACIO: INICIAR   •   T: PERFIL DISPOSITIVO ]" if is_spanish else "[ SPACE: START   •   T: DEVICE PROFILE ]"
+        else:
+            if countdown_sec is not None and countdown_sec > 0:
+                rem = max(1, math.ceil(countdown_sec))
+                prompt_str = f"► BUSCANDO JUGADORES ({rem}s) • MIRA A LA CÁMARA ◄" if is_spanish else f"► SEARCHING FOR PLAYERS ({rem}s) • LOOK AT CAMERA ◄"
+            else:
+                prompt_str = "►  MIRA A LA CÁMARA PARA JUGAR  ◄" if is_spanish else "►  LOOK AT THE CAMERA TO PLAY  ◄"
+            kb_str = "[ ESPACIO: INICIAR   •   T: PERFIL DISPOSITIVO ]" if is_spanish else "[ SPACE: START   •   T: DEVICE PROFILE ]"
+
         prompt_surf = self.renderer.font_banner.render(prompt_str, True, callout_color)
         self.screen.blit(prompt_surf, prompt_surf.get_rect(center=(center_x, center_y + 25)))
 
         # 3. Minimal Subtle Secondary Prompt (Keyboard alternative + Profile hint)
-        kb_str = "[ ESPACIO: INICIAR   •   T: PERFIL DISPOSITIVO ]" if is_spanish else "[ SPACE: START   •   T: DEVICE PROFILE ]"
         kb_surf = self.renderer.font_hud.render(kb_str, True, self.colors.text_muted)
         self.screen.blit(kb_surf, kb_surf.get_rect(center=(center_x, center_y + 68)))
 
-    def draw_calibration_screen(self, tracking_state: TrackingState, progress: float) -> None:
-        """Renders the 3-second face calibration sequence inside the arena."""
+    def draw_calibration_screen(self, tracking_state: TrackingState, progress: float, is_pvp: bool = False) -> None:
+        """Renders the face calibration sequence inside the arena (single or dual reticle)."""
         arena = self.renderer.arena_rect
         center_x = arena.centerx
         center_y = arena.centery
 
-        # Header
-        hdr = self.renderer.font_banner.render("CALIBRATING FACIAL TRACKING", True, self.colors.player_primary)
-        self.screen.blit(hdr, hdr.get_rect(center=(center_x, arena.top + 50)))
+        title = "CALIBRATING DUAL FACIAL TRACKING" if is_pvp else "CALIBRATING FACIAL TRACKING"
+        hdr = self.renderer.font_banner.render(title, True, self.colors.player_primary)
+        self.screen.blit(hdr, hdr.get_rect(center=(center_x, arena.top + 45)))
 
-        sub = self.renderer.font_hud.render("Please face the camera in your neutral position", True, self.colors.text_muted)
-        self.screen.blit(sub, sub.get_rect(center=(center_x, arena.top + 85)))
+        sub_text = (
+            "Player 1 (Left) & Player 2 (Right): Look at the camera"
+            if is_pvp
+            else "Please face the camera in your neutral position"
+        )
+        sub = self.renderer.font_hud.render(sub_text, True, self.colors.text_muted)
+        self.screen.blit(sub, sub.get_rect(center=(center_x, arena.top + 75)))
 
-        # Circular Cyber Reticle in center
-        radius = 75
-        pygame.draw.circle(self.screen, (25, 32, 50), (center_x, center_y), radius, 2)
-        pygame.draw.circle(self.screen, self.colors.player_glow, (center_x, center_y), radius + 8, 1)
-
-        # Progress Arc
-        sweep_angle = int(progress * 360)
-        if sweep_angle > 0:
-            rect = pygame.Rect(center_x - radius, center_y - radius, radius * 2, radius * 2)
-            pygame.draw.arc(self.screen, self.colors.player_primary, rect, 0, math.radians(sweep_angle), 4)
-
-        # Countdown number
         remaining = max(1, math.ceil(self.config.camera.calibration_duration_sec * (1.0 - progress)))
-        cd_surf = self.renderer.font_title.render(str(remaining), True, self.colors.player_primary)
-        self.screen.blit(cd_surf, cd_surf.get_rect(center=(center_x, center_y)))
+        sweep_angle = int(progress * 360)
 
-        # Status text below reticle
-        lock_status = "POSITION LOCKED • HOLD STILL" if tracking_state.face_detected else "SEARCHING FOR FACE..."
-        col = self.colors.player_primary if tracking_state.face_detected else self.colors.danger
-        lbl = self.renderer.font_hud.render(lock_status, True, col)
-        self.screen.blit(lbl, lbl.get_rect(center=(center_x, center_y + radius + 35)))
+        if is_pvp:
+            # Dual Reticles: Left = Player 1 (Cyan), Right = Player 2 (Crimson)
+            spacing = min(220, arena.width // 4)
+            p1_cx = center_x - spacing
+            p2_cx = center_x + spacing
+            radius = 65
+
+            for cx, label, detected, col in [
+                (p1_cx, "PLAYER 1", tracking_state.p1_detected, self.colors.player_primary),
+                (p2_cx, "PLAYER 2", tracking_state.p2_detected, self.colors.ai_primary),
+            ]:
+                pygame.draw.circle(self.screen, (25, 32, 50), (cx, center_y), radius, 2)
+                glow_col = self.colors.player_glow if col == self.colors.player_primary else self.colors.ai_glow
+                pygame.draw.circle(self.screen, glow_col, (cx, center_y), radius + 6, 1)
+
+                if sweep_angle > 0:
+                    rect = pygame.Rect(cx - radius, center_y - radius, radius * 2, radius * 2)
+                    pygame.draw.arc(self.screen, col, rect, 0, math.radians(sweep_angle), 4)
+
+                cd_surf = self.renderer.font_title.render(str(remaining), True, col)
+                self.screen.blit(cd_surf, cd_surf.get_rect(center=(cx, center_y)))
+
+                name_surf = self.renderer.font_hud.render(label, True, col)
+                self.screen.blit(name_surf, name_surf.get_rect(center=(cx, center_y - radius - 18)))
+
+                lock_str = "LOCKED" if detected else "SEARCHING..."
+                lock_col = col if detected else self.colors.danger
+                lbl = self.renderer.font_hud.render(lock_str, True, lock_col)
+                self.screen.blit(lbl, lbl.get_rect(center=(cx, center_y + radius + 25)))
+        else:
+            # Circular Cyber Reticle in center
+            radius = 75
+            pygame.draw.circle(self.screen, (25, 32, 50), (center_x, center_y), radius, 2)
+            pygame.draw.circle(self.screen, self.colors.player_glow, (center_x, center_y), radius + 8, 1)
+
+            if sweep_angle > 0:
+                rect = pygame.Rect(center_x - radius, center_y - radius, radius * 2, radius * 2)
+                pygame.draw.arc(self.screen, self.colors.player_primary, rect, 0, math.radians(sweep_angle), 4)
+
+            cd_surf = self.renderer.font_title.render(str(remaining), True, self.colors.player_primary)
+            self.screen.blit(cd_surf, cd_surf.get_rect(center=(center_x, center_y)))
+
+            lock_status = "POSITION LOCKED • HOLD STILL" if tracking_state.face_detected else "SEARCHING FOR FACE..."
+            col = self.colors.player_primary if tracking_state.face_detected else self.colors.danger
+            lbl = self.renderer.font_hud.render(lock_status, True, col)
+            self.screen.blit(lbl, lbl.get_rect(center=(center_x, center_y + radius + 35)))
 
     def draw_game_over_screen(self, state_mgr: GameStateManager, tracking_state: TrackingState) -> None:
         """Renders match results and statistical telemetry inside arena."""
         arena = self.renderer.arena_rect
         center_x = arena.centerx
 
-        winner_player = (state_mgr.winner == "PLAYER")
-        winner_color = self.colors.player_primary if winner_player else self.colors.ai_primary
-        title_text = "PLAYER VICTORIOUS!" if winner_player else "AUDACIA AI DOMINATION!"
+        if state_mgr.is_pvp:
+            winner_p1 = (state_mgr.winner == "PLAYER 1")
+            winner_color = self.colors.player_primary if winner_p1 else self.colors.ai_primary
+            title_text = "PLAYER 1 VICTORIOUS!" if winner_p1 else "PLAYER 2 VICTORIOUS!"
+        else:
+            winner_player = (state_mgr.winner == "PLAYER")
+            winner_color = self.colors.player_primary if winner_player else self.colors.ai_primary
+            title_text = "PLAYER VICTORIOUS!" if winner_player else "AUDACIA AI DOMINATION!"
 
         # Banner
         banner_surf = self.renderer.font_title.render(title_text, True, winner_color)
@@ -133,11 +189,12 @@ class ScreenManager:
         mins = int(state_mgr.match_duration_sec // 60)
         secs = int(state_mgr.match_duration_sec % 60)
         dur_str = f"{mins:02d}:{secs:02d}"
+        mode_str = "2-PLAYER HUMAN PvP" if state_mgr.is_pvp else "SOLO VS AUDACIA AI"
 
         stats = [
+            f"MATCH MODE:            {mode_str}",
             f"MATCH DURATION:        {dur_str}",
             f"LONGEST RALLY:         {state_mgr.max_rally_match} VOLLEYS",
-            f"FINAL SCORE:           {state_mgr.player_score} - {state_mgr.ai_score}",
             f"AUTONOMOUS RESET:      RETURNING TO TITLE SHORTLY",
         ]
 

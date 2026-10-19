@@ -206,7 +206,7 @@ class NeonRenderer:
 
     def trigger_match_end(self, winner: str) -> None:
         """Activates match conclusion visuals (gold victory or red cyber-glitch defeat)."""
-        self.match_result = "player_win" if winner == "PLAYER" else "ai_win"
+        self.match_result = "player_win" if winner in ("PLAYER", "PLAYER 1", "PLAYER 2") else "ai_win"
 
     def reset_match_effects(self) -> None:
         """Resets visual event states for a new match."""
@@ -293,9 +293,10 @@ class NeonRenderer:
         ai_difficulty: float,
         match_duration_sec: float = 0.0,
         rally_count: int = 0,
+        is_pvp: bool = False,
     ) -> None:
         """
-        Renders the outer scoreboard, AI difficulty telemetry, and camera PIP
+        Renders the outer scoreboard, AI difficulty telemetry (or PvP balance), and camera PIP
         completely outside the playing field (in the top header bar).
         """
         header_h = self.arena_rect.top
@@ -320,8 +321,12 @@ class NeonRenderer:
 
         # Team names
         prof_tag = getattr(tracking_state, "device_profile_label", "AUTO")
-        lbl_p = self.font_hud.render(f"PLAYER [{prof_tag}]", True, self.colors.player_primary)
-        lbl_ai = self.font_hud.render("AUDACIA AI", True, self.colors.ai_primary)
+        if is_pvp:
+            lbl_p = self.font_hud.render(f"PLAYER 1 [{prof_tag}]", True, self.colors.player_primary)
+            lbl_ai = self.font_hud.render(f"PLAYER 2 [{prof_tag}]", True, self.colors.ai_primary)
+        else:
+            lbl_p = self.font_hud.render(f"PLAYER [{prof_tag}]", True, self.colors.player_primary)
+            lbl_ai = self.font_hud.render("AUDACIA AI", True, self.colors.ai_primary)
         self.screen.blit(lbl_p, (score_rect.left - 130, 28))
         self.screen.blit(lbl_ai, (score_rect.right + 18, 28))
 
@@ -332,28 +337,47 @@ class NeonRenderer:
         surf_telem = self.font_hud.render(telemetry, True, self.colors.amber_accent)
         self.screen.blit(surf_telem, surf_telem.get_rect(center=(center_x, 82)))
 
-        # 3. Right: AI Neural Core Telemetry Meter
+        # 3. Right: AI Neural Core Telemetry Meter or PvP Contest Meter
         meter_w = 175
         meter_h = 10
         meter_x = self.arena_rect.right - meter_w
         meter_y = 48
 
-        core_title = self.font_hud.render("AUDACIA NEURAL CORE", True, self.colors.text_primary)
-        self.screen.blit(core_title, (meter_x, 22))
+        if is_pvp:
+            core_title = self.font_hud.render("DUAL HUMAN ARENA", True, self.colors.text_primary)
+            self.screen.blit(core_title, (meter_x, 22))
 
-        # Meter background
-        pygame.draw.rect(self.screen, (24, 28, 42), (meter_x, meter_y, meter_w, meter_h), border_radius=3)
-        fill_w = int(meter_w * max(0.0, min(1.0, ai_difficulty)))
-        fill_col = self.colors.player_primary if ai_difficulty < 0.55 else self.colors.ai_primary
-        if fill_w > 0:
-            pygame.draw.rect(self.screen, fill_col, (meter_x, meter_y, fill_w, meter_h), border_radius=3)
-        pygame.draw.rect(self.screen, self.colors.divider_line, (meter_x, meter_y, meter_w, meter_h), width=1, border_radius=3)
+            # Meter background
+            pygame.draw.rect(self.screen, (24, 28, 42), (meter_x, meter_y, meter_w, meter_h), border_radius=3)
+            total_pts = player_score + ai_score
+            balance = 0.5 if total_pts == 0 else (player_score / total_pts)
+            fill_w = int(meter_w * max(0.0, min(1.0, balance)))
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, self.colors.player_primary, (meter_x, meter_y, fill_w, meter_h), border_radius=3)
+            pygame.draw.rect(self.screen, self.colors.divider_line, (meter_x, meter_y, meter_w, meter_h), width=1, border_radius=3)
 
-        diff_pct = self.font_hud.render(f"DDA {int(ai_difficulty * 100)}%", True, fill_col)
-        self.screen.blit(diff_pct, (meter_x, meter_y + 16))
+            p1_tag = self.font_hud.render(f"P1 {player_score}", True, self.colors.player_primary)
+            self.screen.blit(p1_tag, (meter_x, meter_y + 16))
 
-        dda_tag = self.font_hud.render("ADAPTIVE", True, self.colors.text_muted)
-        self.screen.blit(dda_tag, (meter_x + meter_w - dda_tag.get_width(), meter_y + 16))
+            p2_tag = self.font_hud.render(f"P2 {ai_score}", True, self.colors.ai_primary)
+            self.screen.blit(p2_tag, (meter_x + meter_w - p2_tag.get_width(), meter_y + 16))
+        else:
+            core_title = self.font_hud.render("AUDACIA NEURAL CORE", True, self.colors.text_primary)
+            self.screen.blit(core_title, (meter_x, 22))
+
+            # Meter background
+            pygame.draw.rect(self.screen, (24, 28, 42), (meter_x, meter_y, meter_w, meter_h), border_radius=3)
+            fill_w = int(meter_w * max(0.0, min(1.0, ai_difficulty)))
+            fill_col = self.colors.player_primary if ai_difficulty < 0.55 else self.colors.ai_primary
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, fill_col, (meter_x, meter_y, fill_w, meter_h), border_radius=3)
+            pygame.draw.rect(self.screen, self.colors.divider_line, (meter_x, meter_y, meter_w, meter_h), width=1, border_radius=3)
+
+            diff_pct = self.font_hud.render(f"DDA {int(ai_difficulty * 100)}%", True, fill_col)
+            self.screen.blit(diff_pct, (meter_x, meter_y + 16))
+
+            dda_tag = self.font_hud.render("ADAPTIVE", True, self.colors.text_muted)
+            self.screen.blit(dda_tag, (meter_x + meter_w - dda_tag.get_width(), meter_y + 16))
 
     def render_camera_pip_box(self, tracking_state: TrackingState, position: Tuple[int, int], size: Tuple[int, int]) -> None:
         """Draws framed camera preview in designated rectangular area."""

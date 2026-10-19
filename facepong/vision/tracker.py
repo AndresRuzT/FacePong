@@ -47,6 +47,15 @@ class TrackingState:
     calibration_progress: float = 0.0
     is_calibrated: bool = False
     device_profile_label: str = "AUTO"
+    # Multi-player PvP fields
+    face_count: int = 0
+    is_pvp: bool = False
+    p1_detected: bool = False
+    p1_raw_y: float = 0.5
+    p1_smoothed_y: float = 0.5
+    p2_detected: bool = False
+    p2_raw_y: float = 0.5
+    p2_smoothed_y: float = 0.5
 
 
 class FaceMeshTracker:
@@ -55,7 +64,35 @@ class FaceMeshTracker:
     def __init__(self, config: CameraConfig):
         self.config = config
 
-        # Exponential Moving Average state
+        # Multi-player PvP state
+        self.face_count: int = 0
+        self.is_pvp: bool = False
+
+        # Player 1 (Left paddle / Solo) state
+        self.p1_detected: bool = False
+        self.p1_raw_y: float = 0.5
+        self.p1_smoothed_y: float = 0.5
+        self._p1_last_valid_raw_y: float = 0.5
+        self._p1_last_valid_detection_time: float = 0.0
+        self._p1_is_first_sample: bool = True
+        self._p1_clamped_at_min_count: int = 0
+        self._p1_clamped_at_max_count: int = 0
+        self._p1_velocity_y: float = 0.0
+        self._p1_last_raw_y_sample_time: float = 0.0
+
+        # Player 2 (Right paddle in PvP) state
+        self.p2_detected: bool = False
+        self.p2_raw_y: float = 0.5
+        self.p2_smoothed_y: float = 0.5
+        self._p2_last_valid_raw_y: float = 0.5
+        self._p2_last_valid_detection_time: float = 0.0
+        self._p2_is_first_sample: bool = True
+        self._p2_clamped_at_min_count: int = 0
+        self._p2_clamped_at_max_count: int = 0
+        self._p2_velocity_y: float = 0.0
+        self._p2_last_raw_y_sample_time: float = 0.0
+
+        # Backwards compatible alias for single player
         self._smoothed_y: float = 0.5
         self._is_first_sample: bool = True
 
@@ -65,6 +102,8 @@ class FaceMeshTracker:
         initial_spread = base_spread / (sensitivity ** 0.6)
         self._min_y_bound: float = max(0.02, 0.5 - initial_spread)
         self._max_y_bound: float = min(0.98, 0.5 + initial_spread)
+        self._p2_min_y_bound: float = max(0.02, 0.5 - initial_spread)
+        self._p2_max_y_bound: float = min(0.98, 0.5 + initial_spread)
         self._calibration_samples: List[float] = []
 
         # Grace period & adaptive recentering state
@@ -218,267 +257,331 @@ class FaceMeshTracker:
         self._clamped_at_max_count = 0
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
 
-    def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None) -> None:
+    def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None, player_idx: int = 1) -> None:
         """Sets comfortable dynamic range around player's neutral head position based on sensitivity."""
         if range_spread is None:
             range_spread = self.get_effective_range_spread()
-        self._min_y_bound = max(0.02, neutral_y - range_spread)
-        self._max_y_bound = min(0.98, neutral_y + range_spread)
-        logger.info(
-            "Calibrated head range: [%.2f, %.2f] around neutral %.2f (effective spread: ±%.3f, profile: %s)",
-            self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
-        )
+        min_b = max(0.02, neutral_y - range_spread)
+        max_b = min(0.98, neutral_y + range_spread)
+        if player_idx == 1:
+            self._min_y_bound = min_b
+            self._max_y_bound = max_b
+            logger.info(
+                "Calibrated P1 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
+                self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
+            )
+        else:
+            self._p2_min_y_bound = min_b
+            self._p2_max_y_bound = max_b
+            logger.info(
+                "Calibrated P2 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
+                self._p2_min_y_bound, self._p2_max_y_bound, neutral_y, range_spread, self.device_profile.value,
+            )
+
+    def _update_player_state(
+        self, raw_y: float, face_height: float, frame_height: int, now: float, player_idx: int = 1
+    ) -> float:
+        """Computes velocity, auto-baseline anchoring, distance scaling, non-linear curve, and EMA for P1 or P2."""
+        if player_idx == 1:
+            last_raw = self._p1_last_valid_raw_y
+            last_time = self._p1_last_raw_y_sample_time
+            is_first = self._p1_is_first_sample
+            recenter = self._recenter_needed
+            min_b = self._min_y_bound
+            max_b = self._max_y_bound
+            smoothed = self.p1_smoothed_y
+            c_max = self._p1_clamped_at_max_count
+            c_min = self._p1_clamped_at_min_count
+            vel = self._p1_velocity_y
+        else:
+            last_raw = self._p2_last_valid_raw_y
+            last_time = self._p2_last_raw_y_sample_time
+            is_first = self._p2_is_first_sample
+            recenter = self._recenter_needed
+            min_b = self._p2_min_y_bound
+            max_b = self._p2_max_y_bound
+            smoothed = self.p2_smoothed_y
+            c_max = self._p2_clamped_at_max_count
+            c_min = self._p2_clamped_at_min_count
+            vel = self._p2_velocity_y
+
+        if last_time > 0:
+            dt_s = max(0.001, now - last_time)
+            instant_vel = (raw_y - last_raw) / dt_s
+            vel = 0.5 * vel + 0.5 * instant_vel
+
+        # Re-anchor baseline if needed
+        if recenter or is_first:
+            face_frac = (face_height / float(frame_height)) if (face_height > 0 and frame_height > 0) else None
+            init_spread = self.get_effective_range_spread(face_frac)
+            min_b = max(0.02, raw_y - init_spread)
+            max_b = min(0.98, raw_y + init_spread)
+            smoothed = 0.5
+            is_first = False
+
+        # In AUTO mode, dynamically adapt sensitivity based on distance
+        if self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
+            target_spread = self.get_effective_range_spread(face_height / float(frame_height))
+            curr_spread = 0.5 * (max_b - min_b)
+            new_spread = 0.96 * curr_spread + 0.04 * target_spread
+            mid_y = 0.5 * (min_b + max_b)
+            min_b = max(0.02, mid_y - new_spread)
+            max_b = min(0.98, mid_y + new_spread)
+
+        # Baseline drift if clamped at edge
+        span = max(0.01, max_b - min_b)
+        if raw_y > max_b:
+            c_max += 1
+            if c_max > 12:
+                drift = (raw_y - max_b) * 0.12
+                max_b += drift
+                min_b += drift
+        else:
+            c_max = 0
+
+        if raw_y < min_b:
+            c_min += 1
+            if c_min > 12:
+                drift = (raw_y - min_b) * 0.12
+                min_b += drift
+                max_b += drift
+        else:
+            c_min = 0
+
+        # Map to linear [0.0, 1.0]
+        linear_y = float(np.clip((raw_y - min_b) / span, 0.0, 1.0))
+
+        # Progressive sensitivity curve
+        u = 2.0 * (linear_y - 0.5)
+        abs_u = abs(u)
+        sign_u = 1.0 if u >= 0 else -1.0
+        curved_u = sign_u * (0.65 * abs_u + 0.35 * (abs_u ** 1.35))
+        mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
+
+        # Single-pass adaptive EMA smoothing
+        base_alpha = self.get_effective_ema_alpha()
+        if is_first:
+            smoothed = mapped_y
+        else:
+            diff = abs(mapped_y - smoothed)
+            alpha_boost = min(1.0, (diff / 0.12) ** 1.2)
+            eff_alpha = base_alpha + (0.55 - base_alpha) * alpha_boost
+            smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
+
+        # Save back into state
+        if player_idx == 1:
+            self._p1_last_valid_raw_y = raw_y
+            self._p1_last_raw_y_sample_time = now
+            self._p1_last_valid_detection_time = now
+            self._p1_is_first_sample = is_first
+            self._min_y_bound = min_b
+            self._max_y_bound = max_b
+            self.p1_smoothed_y = smoothed
+            self._p1_clamped_at_max_count = c_max
+            self._p1_clamped_at_min_count = c_min
+            self._p1_velocity_y = vel
+            self._smoothed_y = smoothed
+            self._last_valid_raw_y = raw_y
+            self._last_valid_detection_time = now
+            self._is_first_sample = is_first
+        else:
+            self._p2_last_valid_raw_y = raw_y
+            self._p2_last_raw_y_sample_time = now
+            self._p2_last_valid_detection_time = now
+            self._p2_is_first_sample = is_first
+            self._p2_min_y_bound = min_b
+            self._p2_max_y_bound = max_b
+            self.p2_smoothed_y = smoothed
+            self._p2_clamped_at_max_count = c_max
+            self._p2_clamped_at_min_count = c_min
+            self._p2_velocity_y = vel
+
+        return smoothed
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
         """
-        Executes face detection with ROI tracking, extracts smoothed Y,
-        adapts baseline if clamped, and renders cyber HUD preview.
-
-        Architecture (YuNet on Raspberry Pi):
-          Phase 1: ROI fast path — crop around last known face, detect in ~3ms
-          Phase 2: Full scan fallback — detect at 160×120 in ~15ms
-          Result: sustained 30+ FPS detection on Raspberry Pi 4
-
+        Executes face detection supporting 1 or 2 players simultaneously.
+        Partitions candidates horizontally: Leftmost = Player 1, Rightmost = Player 2.
+        
         Returns:
-            Tuple of (effective_face_detected, raw_y, smoothed_y, hud_rgb_preview)
+            Tuple of (effective_p1_detected, p1_raw_y, p1_smoothed_y, hud_rgb_preview)
         """
         if self.config.flip_horizontal:
             frame = cv2.flip(frame, 1)
 
         h, w, _ = frame.shape
-        raw_face_detected = False
-        raw_y = self._last_valid_raw_y
         now = time.perf_counter()
-        effective_detected = False
 
-        # Landmark coordinates in original frame space (populated by any detector)
-        det_nose_x = det_nose_y = 0.0
-        det_re_x = det_re_y = det_le_x = det_le_y = 0.0
-        det_rm_x = det_rm_y = det_lm_x = det_lm_y = 0.0
-        det_fx = det_fy = det_fw = det_fh = 0.0
+        faces: List[dict] = []
 
-        # ─── MediaPipe Face Mesh (laptop / GPU-capable environments) ───
-        if self._face_mesh is not None:
+        # ─── 1. YuNet Multi-Face Detection (Preferred edge path) ───
+        if self._yunet is not None:
+            try:
+                faces = self._yunet_detect_multi(frame, w, h)
+            except Exception as exc:
+                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
+
+        # ─── 2. MediaPipe Face Mesh fallback ───
+        elif self._face_mesh is not None:
             try:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb_frame.flags.writeable = False
                 results = self._face_mesh.process(rgb_frame)
                 rgb_frame.flags.writeable = True
                 if results and results.multi_face_landmarks:
-                    raw_face_detected = True
-                    landmarks = results.multi_face_landmarks[0].landmark
-                    nose_point = landmarks[NOSE_TIP_IDX]
-                    glabella_point = landmarks[GLABELLA_IDX]
-                    raw_y = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
-                    det_nose_x = nose_point.x * w
-                    det_nose_y = nose_point.y * h
-                    # Chin is landmark 152, top forehead is landmark 10
-                    det_fh = abs(landmarks[152].y - landmarks[10].y) * h
-                    det_fw = abs(landmarks[454].x - landmarks[234].x) * w
-                    det_fx = nose_point.x * w - det_fw * 0.5
-                    det_fy = nose_point.y * h - det_fh * 0.5
+                    for fl in results.multi_face_landmarks[:2]:
+                        landmarks = fl.landmark
+                        nose = landmarks[NOSE_TIP_IDX]
+                        glabella = landmarks[GLABELLA_IDX]
+                        ry = float(0.55 * nose.y + 0.45 * glabella.y)
+                        det_fh = abs(landmarks[152].y - landmarks[10].y) * h
+                        det_fw = abs(landmarks[454].x - landmarks[234].x) * w
+                        faces.append({
+                            "raw_y": ry,
+                            "center_x": nose.x * w,
+                            "fx": nose.x * w - det_fw * 0.5,
+                            "fy": nose.y * h - det_fh * 0.5,
+                            "fw": det_fw, "fh": det_fh,
+                            "nose_x": nose.x * w, "nose_y": nose.y * h,
+                        })
+                    faces.sort(key=lambda f: f["center_x"])
             except Exception as exc:
-                logger.debug("MediaPipe Face Mesh process exception: %s", exc)
+                logger.debug("MediaPipe multi-face exception: %s", exc)
 
-        # ─── YuNet 2-Phase ROI Tracking (Raspberry Pi / edge devices) ───
-        elif self._yunet is not None:
-            try:
-                raw_face_detected, raw_y, det_nose_x, det_nose_y, det_fx, det_fy, det_fw, det_fh, \
-                    det_re_x, det_re_y, det_le_x, det_le_y, det_rm_x, det_rm_y, det_lm_x, det_lm_y = \
-                    self._yunet_detect_2phase(frame, w, h)
-            except Exception as exc:
-                logger.debug("OpenCV YuNet process exception: %s", exc)
-
-        # ─── Haar Cascade fallback (only when no other detector is available) ───
+        # ─── 3. Haar Cascade fallback ───
         elif self._cascade is not None and not self._cascade.empty():
-            raw_face_detected, raw_y, det_fx, det_fy, det_fw, det_fh = \
-                self._cascade_detect(frame, w, h)
+            det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
+            if det:
+                faces.append({
+                    "raw_y": ry,
+                    "center_x": fx + fw * 0.5,
+                    "fx": fx, "fy": fy, "fw": fw, "fh": fh,
+                    "nose_x": fx + fw * 0.5, "nose_y": fy + fh * 0.5,
+                })
 
-        # ─── Smoothing, baseline adaptation, and state update ───
-        if raw_face_detected:
-            # Kinematic velocity estimation
-            if self._last_raw_y_sample_time > 0:
-                dt_sample = max(0.001, now - self._last_raw_y_sample_time)
-                instant_vel = (raw_y - self._last_valid_raw_y) / dt_sample
-                self._velocity_y = 0.5 * self._velocity_y + 0.5 * instant_vel
-            self._last_raw_y_sample_time = now
-            self._last_valid_raw_y = raw_y
-            self._last_valid_detection_time = now
-            effective_detected = True
+        self.face_count = len(faces)
+        self.is_pvp = (self.face_count >= 2)
 
-            # Re-anchor baseline immediately if camera was switched or requested, OR on very first face seen
-            if self._recenter_needed or self._is_first_sample:
-                face_frac = (det_fh / float(h)) if (det_fh > 0 and h > 0) else None
-                init_spread = self.get_effective_range_spread(face_frac)
-                self.calibrate_baseline(raw_y, range_spread=init_spread)
-                self._smoothed_y = 0.5
-                self._is_first_sample = False
-                self._recenter_needed = False
-                logger.info(
-                    "Auto-anchored neutral baseline to %.2f (spread: ±%.3f, profile: %s)",
-                    raw_y, init_spread, self.device_profile.value,
-                )
+        p1_face = faces[0] if len(faces) >= 1 else None
+        p2_face = faces[1] if len(faces) >= 2 else None
 
-            # In AUTO mode, dynamically and smoothly adapt sensitivity based on player distance
-            if self.device_profile == DeviceProfile.AUTO and det_fh > 0 and h > 0:
-                target_spread = self.get_effective_range_spread(det_fh / float(h))
-                current_spread = 0.5 * (self._max_y_bound - self._min_y_bound)
-                new_spread = 0.96 * current_spread + 0.04 * target_spread
-                mid_y = 0.5 * (self._min_y_bound + self._max_y_bound)
-                self._min_y_bound = max(0.02, mid_y - new_spread)
-                self._max_y_bound = min(0.98, mid_y + new_spread)
-
-            # Drift baseline if player is consistently clamped at an edge (>12 frames)
-            span = max(0.01, (self._max_y_bound - self._min_y_bound))
-            if raw_y > self._max_y_bound:
-                self._clamped_at_max_count += 1
-                if self._clamped_at_max_count > 12:
-                    drift = (raw_y - self._max_y_bound) * 0.12
-                    self._max_y_bound += drift
-                    self._min_y_bound += drift
-            else:
-                self._clamped_at_max_count = 0
-
-            if raw_y < self._min_y_bound:
-                self._clamped_at_min_count += 1
-                if self._clamped_at_min_count > 12:
-                    drift = (raw_y - self._min_y_bound) * 0.12
-                    self._min_y_bound += drift
-                    self._max_y_bound += drift
-            else:
-                self._clamped_at_min_count = 0
-
-            # Map raw_y into normalized linear [0.0, 1.0]
-            linear_y = (raw_y - self._min_y_bound) / span
-            linear_y = float(np.clip(linear_y, 0.0, 1.0))
-
-            # Ergonomic progressive sensitivity curve
-            u = 2.0 * (linear_y - 0.5)
-            abs_u = abs(u)
-            sign_u = 1.0 if u >= 0 else -1.0
-            curved_u = sign_u * (0.65 * abs_u + 0.35 * (abs_u ** 1.35))
-            mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
-
-            # Single-pass adaptive EMA smoothing
-            base_alpha = self.get_effective_ema_alpha()
-            if self._is_first_sample:
-                self._smoothed_y = mapped_y
-                self._is_first_sample = False
-            else:
-                diff = abs(mapped_y - self._smoothed_y)
-                alpha_boost = min(1.0, (diff / 0.12) ** 1.2)
-                effective_alpha = base_alpha + (0.55 - base_alpha) * alpha_boost
-                self._smoothed_y = (effective_alpha * mapped_y) + ((1.0 - effective_alpha) * self._smoothed_y)
+        # Update Player 1 state
+        if p1_face is not None:
+            effective_p1_detected = True
+            self.p1_detected = True
+            self.p1_raw_y = p1_face["raw_y"]
+            self.p1_smoothed_y = self._update_player_state(p1_face["raw_y"], p1_face["fh"], h, now, player_idx=1)
         else:
-            # Grace period (0.4s): hold position during momentary detection drops
-            if (now - self._last_valid_detection_time) < 0.4 and not self._is_first_sample:
-                effective_detected = True
+            if (now - self._p1_last_valid_detection_time) < 0.4 and not self._p1_is_first_sample:
+                effective_p1_detected = True
+                self.p1_detected = True
             else:
-                effective_detected = False
-                self._velocity_y = 0.0
+                effective_p1_detected = False
+                self.p1_detected = False
 
-        # ─── Build HUD preview (deferred: only AFTER detection, not blocking it) ───
-        hud_frame = self._build_hud_preview(
-            frame, w, h, raw_face_detected, effective_detected,
-            det_nose_x, det_nose_y, det_fx, det_fy, det_fw, det_fh,
-            det_re_x, det_re_y, det_le_x, det_le_y, det_rm_x, det_rm_y, det_lm_x, det_lm_y,
-        )
+        # Update Player 2 state
+        if p2_face is not None:
+            raw_y_p2 = p2_face["raw_y"]
+            self.p2_detected = True
+            self.p2_raw_y = raw_y_p2
+            self.p2_smoothed_y = self._update_player_state(raw_y_p2, p2_face["fh"], h, now, player_idx=2)
+        else:
+            if (now - self._p2_last_valid_detection_time) < 0.4 and not self._p2_is_first_sample:
+                self.p2_detected = True
+            else:
+                self.p2_detected = False
 
-        return effective_detected, raw_y, self._smoothed_y, hud_frame
+        if self._recenter_needed:
+            self._recenter_needed = False
+
+        # Build dual-player cyber HUD preview
+        hud_frame = self._build_hud_preview_multi(frame, w, h, p1_face, p2_face)
+
+        return effective_p1_detected, self.p1_raw_y, self.p1_smoothed_y, hud_frame
+
+    def _yunet_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
+        """
+        Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
+        Filters background bystanders and returns sorted face list (leftmost first).
+        """
+        net_w, net_h = 160, 120
+        if w != net_w or h != net_h:
+            detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
+            detect_scale_x = w / float(net_w)
+            detect_scale_y = h / float(net_h)
+        else:
+            detect_frame = frame
+            detect_scale_x = 1.0
+            detect_scale_y = 1.0
+
+        self._yunet.setInputSize((net_w, net_h))
+        _, faces = self._yunet.detect(detect_frame)
+        if faces is None or len(faces) == 0:
+            return []
+
+        results = []
+        for face in faces:
+            score = float(face[-1])
+            if score < 0.35:
+                continue
+            fx = float(face[0] * detect_scale_x)
+            fy = float(face[1] * detect_scale_y)
+            fw = float(face[2] * detect_scale_x)
+            fh = float(face[3] * detect_scale_y)
+
+            # Key landmarks
+            re_x = float(face[4] * detect_scale_x)
+            re_y = float(face[5] * detect_scale_y)
+            le_x = float(face[6] * detect_scale_x)
+            le_y = float(face[7] * detect_scale_y)
+            nose_x = float(face[8] * detect_scale_x)
+            nose_y = float(face[9] * detect_scale_y)
+            rm_x = float(face[10] * detect_scale_x)
+            rm_y = float(face[11] * detect_scale_y)
+            lm_x = float(face[12] * detect_scale_x)
+            lm_y = float(face[13] * detect_scale_y)
+
+            # Mid-face anatomical anchor
+            glabella_y = 0.5 * (re_y + le_y)
+            face_center_y = fy + fh * 0.5
+            anchor_y = 0.40 * glabella_y + 0.35 * face_center_y + 0.25 * nose_y
+            raw_y = float(anchor_y / h)
+            center_x = fx + fw * 0.5
+
+            results.append({
+                "raw_y": raw_y,
+                "center_x": center_x,
+                "fx": fx, "fy": fy, "fw": fw, "fh": fh,
+                "nose_x": nose_x, "nose_y": nose_y,
+                "re_x": re_x, "re_y": re_y, "le_x": le_x, "le_y": le_y,
+                "rm_x": rm_x, "rm_y": rm_y, "lm_x": lm_x, "lm_y": lm_y,
+                "score": score,
+            })
+
+        # Discard background spectators: filter faces with area < 0.25 * max_area
+        if results:
+            max_area = max(f["fw"] * f["fh"] for f in results)
+            results = [f for f in results if (f["fw"] * f["fh"]) >= 0.25 * max_area]
+
+        # Sort horizontally: leftmost is first, rightmost is last
+        results.sort(key=lambda f: f["center_x"])
+        return results
 
     def _yunet_detect_2phase(
         self, frame: np.ndarray, w: int, h: int,
     ) -> Tuple[bool, float, float, float, float, float, float, float,
                float, float, float, float, float, float, float, float]:
-        """
-        Two-phase YuNet detection optimized for Raspberry Pi 4:
-          Phase 1 (ROI): Crop around last known face → detect in ~3ms
-          Phase 2 (Full): Scan full frame at 160×120 → detect in ~15ms
-        Returns (detected, raw_y, nose_x, nose_y, fx, fy, fw, fh, re_x, re_y, le_x, le_y, rm_x, rm_y, lm_x, lm_y)
-        """
-        faces = None
-        roi_offset_x = 0
-        roi_offset_y = 0
-        detect_scale_x = 1.0
-        detect_scale_y = 1.0
-
-        # Phase 1: ROI Fast Path — use bounding box from last detection
-        if self._yunet_last_box is not None and self._yunet_roi_miss < 3:
-            bx, by, bw, bh = self._yunet_last_box
-            # Pad ROI by 70% on each side for head movement tolerance
-            pad_x = int(bw * 0.7)
-            pad_y = int(bh * 0.7)
-            rx1 = max(0, bx - pad_x)
-            ry1 = max(0, by - pad_y)
-            rx2 = min(w, bx + bw + pad_x)
-            ry2 = min(h, by + bh + pad_y)
-            roi_w = rx2 - rx1
-            roi_h = ry2 - ry1
-
-            if roi_w >= 40 and roi_h >= 40:
-                roi_crop = frame[ry1:ry2, rx1:rx2]
-                self._yunet.setInputSize((roi_w, roi_h))
-                _, faces = self._yunet.detect(roi_crop)
-                if faces is not None and len(faces) > 0:
-                    roi_offset_x = rx1
-                    roi_offset_y = ry1
-                    detect_scale_x = 1.0
-                    detect_scale_y = 1.0
-                else:
-                    faces = None
-                    self._yunet_roi_miss += 1
-
-        # Phase 2: Full Scan Fallback — scan at 160×120 for speed
-        if faces is None:
-            net_w, net_h = 160, 120
-            if w != net_w or h != net_h:
-                detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
-                detect_scale_x = w / float(net_w)
-                detect_scale_y = h / float(net_h)
-            else:
-                detect_frame = frame
-                detect_scale_x = 1.0
-                detect_scale_y = 1.0
-
-            self._yunet.setInputSize((net_w, net_h))
-            _, faces = self._yunet.detect(detect_frame)
-            roi_offset_x = 0
-            roi_offset_y = 0
-
-        if faces is None or len(faces) == 0:
-            self._yunet_roi_miss += 1
+        """Backward compatible 2-phase YuNet detection returning primary face."""
+        faces = self._yunet_detect_multi(frame, w, h)
+        if not faces:
             return (False, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-        # Pick largest face
-        best = max(faces, key=lambda f: f[2] * f[3])
-        # Map coordinates back to original frame space
-        fx = float(best[0] * detect_scale_x + roi_offset_x)
-        fy = float(best[1] * detect_scale_y + roi_offset_y)
-        fw = float(best[2] * detect_scale_x)
-        fh = float(best[3] * detect_scale_y)
-        re_x = float(best[4] * detect_scale_x + roi_offset_x)
-        re_y = float(best[5] * detect_scale_y + roi_offset_y)
-        le_x = float(best[6] * detect_scale_x + roi_offset_x)
-        le_y = float(best[7] * detect_scale_y + roi_offset_y)
-        nose_x = float(best[8] * detect_scale_x + roi_offset_x)
-        nose_y = float(best[9] * detect_scale_y + roi_offset_y)
-        rm_x = float(best[10] * detect_scale_x + roi_offset_x)
-        rm_y = float(best[11] * detect_scale_y + roi_offset_y)
-        lm_x = float(best[12] * detect_scale_x + roi_offset_x)
-        lm_y = float(best[13] * detect_scale_y + roi_offset_y)
-
-        # Save bounding box for next frame's ROI fast path (in original frame coordinates)
-        self._yunet_last_box = (int(fx), int(fy), int(fw), int(fh))
-        self._yunet_roi_miss = 0
-
-        # Anatomical mid-face anchor: combines eyes + face center + nose tip for strong vertical responsiveness
-        glabella_y = 0.5 * (re_y + le_y)
-        face_center_y = fy + fh * 0.5
-        anchor_y = 0.40 * glabella_y + 0.35 * face_center_y + 0.25 * nose_y
-        raw_y = float(anchor_y / h)
-
-        return (True, raw_y, nose_x, nose_y, fx, fy, fw, fh,
-                re_x, re_y, le_x, le_y, rm_x, rm_y, lm_x, lm_y)
+        best = faces[0]
+        return (
+            True, best["raw_y"], best["nose_x"], best["nose_y"],
+            best["fx"], best["fy"], best["fw"], best["fh"],
+            best["re_x"], best["re_y"], best["le_x"], best["le_y"],
+            best["rm_x"], best["rm_y"], best["lm_x"], best["lm_y"],
+        )
 
     def _cascade_detect(
         self, frame: np.ndarray, w: int, h: int,
@@ -525,15 +628,11 @@ class FaceMeshTracker:
         raw_y = float(center_y / h)
         return (True, raw_y, orig_fx, orig_fy, orig_fw, orig_fh)
 
-    def _build_hud_preview(
+    def _build_hud_preview_multi(
         self, frame: np.ndarray, w: int, h: int,
-        raw_detected: bool, effective_detected: bool,
-        nose_x: float, nose_y: float,
-        fx: float, fy: float, fw: float, fh: float,
-        re_x: float, re_y: float, le_x: float, le_y: float,
-        rm_x: float, rm_y: float, lm_x: float, lm_y: float,
+        p1_face: Optional[dict], p2_face: Optional[dict],
     ) -> np.ndarray:
-        """Renders the camera HUD preview overlay (deferred, not in detection hot path)."""
+        """Renders dual-player HUD preview overlay with independent P1 (cyan) and P2 (crimson) bounding reticles."""
         preview_h = self.config.preview_height
         preview_w = self.config.preview_width
         hud_frame = cv2.resize(frame, (preview_w, preview_h), interpolation=cv2.INTER_LINEAR)
@@ -542,47 +641,64 @@ class FaceMeshTracker:
         scale_x = preview_w / float(w)
         scale_y = preview_h / float(h)
 
-        if raw_detected:
-            if self._face_mesh is not None:
-                # MediaPipe: use full landmark set for contour dots
-                # (landmarks were already consumed; draw nose reticle from saved coords)
-                pass  # MediaPipe HUD drawing handled inline above if needed
+        # Center demarcation divider in PvP mode
+        if self.is_pvp or p2_face is not None:
+            mid_x = preview_w // 2
+            for dy in range(4, preview_h - 16, 8):
+                cv2.line(hud_frame, (mid_x, dy), (mid_x, min(preview_h - 16, dy + 4)), (55, 65, 88), 1)
 
-            if self._yunet is not None and fw > 0:
-                # YuNet: draw facial contour wireframe (oval of cyan dots)
-                cx_p = int((fx + fw * 0.5) * scale_x)
-                cy_p = int((fy + fh * 0.52) * scale_y)
-                rx = fw * 0.46 * scale_x
-                ry = fh * 0.52 * scale_y
-                for deg in range(0, 360, 24):
-                    rad = math.radians(deg)
-                    px = int(cx_p + rx * math.cos(rad))
-                    py = int(cy_p + ry * math.sin(rad))
-                    cv2.circle(hud_frame, (px, py), 1, (0, 180, 255), -1)
+        # Render Player 1 (Cyan)
+        if p1_face is not None:
+            fx, fy, fw, fh = p1_face["fx"], p1_face["fy"], p1_face["fw"], p1_face["fh"]
+            rx1 = int(fx * scale_x)
+            ry1 = int(fy * scale_y)
+            rx2 = int((fx + fw) * scale_x)
+            ry2 = int((fy + fh) * scale_y)
+            cv2.rectangle(hud_frame, (rx1, ry1), (rx2, ry2), (0, 240, 255), 1)
+            cv2.putText(hud_frame, "P1", (rx1 + 2, max(11, ry1 - 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 240, 255), 1, cv2.LINE_AA)
+            nx = int(p1_face.get("nose_x", fx + fw * 0.5) * scale_x)
+            ny = int(p1_face.get("nose_y", fy + fh * 0.5) * scale_y)
+            cv2.circle(hud_frame, (nx, ny), 3, (0, 255, 200), -1)
 
-                # Eyes and mouth keypoints in magenta
-                for kx, ky in [(re_x, re_y), (le_x, le_y), (rm_x, rm_y), (lm_x, lm_y)]:
-                    cv2.circle(hud_frame, (int(kx * scale_x), int(ky * scale_y)), 2, (255, 0, 180), -1)
+        # Render Player 2 (Crimson/Red)
+        if p2_face is not None:
+            fx, fy, fw, fh = p2_face["fx"], p2_face["fy"], p2_face["fw"], p2_face["fh"]
+            rx1 = int(fx * scale_x)
+            ry1 = int(fy * scale_y)
+            rx2 = int((fx + fw) * scale_x)
+            ry2 = int((fy + fh) * scale_y)
+            cv2.rectangle(hud_frame, (rx1, ry1), (rx2, ry2), (255, 60, 90), 1)
+            cv2.putText(hud_frame, "P2", (rx1 + 2, max(11, ry1 - 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 60, 90), 1, cv2.LINE_AA)
+            nx = int(p2_face.get("nose_x", fx + fw * 0.5) * scale_x)
+            ny = int(p2_face.get("nose_y", fy + fh * 0.5) * scale_y)
+            cv2.circle(hud_frame, (nx, ny), 3, (255, 60, 90), -1)
 
-            # Nose reticle / crosshair (both MediaPipe and YuNet)
-            if nose_x > 0 and nose_y > 0:
-                npx = int(nose_x * scale_x)
-                npy = int(nose_y * scale_y)
-                cv2.circle(hud_frame, (npx, npy), 6, (0, 255, 200), 1, cv2.LINE_AA)
-                cv2.line(hud_frame, (npx - 10, npy), (npx + 10, npy), (0, 255, 200), 1)
-                cv2.line(hud_frame, (npx, npy - 10), (npx, npy + 10), (0, 255, 200), 1)
-
-            cv2.putText(hud_frame, "TRACKING: LOCKED", (8, preview_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 180), 1, cv2.LINE_AA)
-        elif effective_detected:
-            cv2.putText(hud_frame, "TRACKING: HOLD", (8, preview_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 200, 255), 1, cv2.LINE_AA)
+        # Status text at bottom of PIP
+        if self.is_pvp:
+            p1_tag = "LOCK" if self.p1_detected else "SEEK"
+            p2_tag = "LOCK" if self.p2_detected else "SEEK"
+            stat_text = f"P1:{p1_tag}  P2:{p2_tag}"
+            stat_col = (0, 255, 180) if (self.p1_detected and self.p2_detected) else (255, 190, 0)
+        elif self.p1_detected:
+            stat_text = f"LOCKED • {self.device_profile.value}"
+            stat_col = (0, 255, 180)
         else:
-            cv2.putText(hud_frame, "NO FACE DETECTED", (8, preview_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 70, 255), 1, cv2.LINE_AA)
+            stat_text = "SEARCHING FOR FACE"
+            stat_col = (0, 80, 255)
 
-        hud_rgb = cv2.cvtColor(hud_frame, cv2.COLOR_BGR2RGB)
-        return hud_rgb
+        cv2.putText(hud_frame, stat_text, (6, preview_h - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.28, stat_col, 1, cv2.LINE_AA)
+
+        return cv2.cvtColor(hud_frame, cv2.COLOR_BGR2RGB)
+
+    def _build_hud_preview(self, *args, **kwargs) -> np.ndarray:
+        """Backward compatibility stub for legacy calls."""
+        frame = args[0] if len(args) > 0 else np.zeros((240, 320, 3), dtype=np.uint8)
+        w = args[1] if len(args) > 1 else frame.shape[1]
+        h = args[2] if len(args) > 2 else frame.shape[0]
+        return self._build_hud_preview_multi(frame, w, h, None, None)
 
     def close(self) -> None:
         """Releases detector resources."""
@@ -616,7 +732,8 @@ class VisionPipeline:
         # Calibration tracking
         self._calibrating = False
         self._calibration_start_time = 0.0
-        self._calibration_samples: List[float] = []
+        self._calibration_samples_p1: List[float] = []
+        self._calibration_samples_p2: List[float] = []
 
     def start(self) -> None:
         """Starts camera and the dedicated computer vision pipeline."""
@@ -626,11 +743,12 @@ class VisionPipeline:
         self._worker_thread.start()
 
     def begin_calibration(self) -> None:
-        """Initiates head position calibration routine."""
+        """Initiates head position calibration routine for active players."""
         with self._lock:
             self._calibrating = True
             self._calibration_start_time = time.perf_counter()
-            self._calibration_samples.clear()
+            self._calibration_samples_p1.clear()
+            self._calibration_samples_p2.clear()
             self._state.is_calibrated = False
             self._state.calibration_progress = 0.0
 
@@ -686,13 +804,24 @@ class VisionPipeline:
                     self._state.smoothed_y = smoothed_y
                     self._state.preview_surface_buffer = hud_preview
                     self._state.device_profile_label = self.tracker.device_profile.value
+                    self._state.face_count = self.tracker.face_count
+                    self._state.is_pvp = self.tracker.is_pvp
+                    self._state.p1_detected = self.tracker.p1_detected
+                    self._state.p1_raw_y = self.tracker.p1_raw_y
+                    self._state.p1_smoothed_y = self.tracker.p1_smoothed_y
+                    self._state.p2_detected = self.tracker.p2_detected
+                    self._state.p2_raw_y = self.tracker.p2_raw_y
+                    self._state.p2_smoothed_y = self.tracker.p2_smoothed_y
+
                     if detected:
                         self._state.last_detected_time = now
 
                     # Handle calibration gathering
                     if self._calibrating:
-                        if detected:
-                            self._calibration_samples.append(raw_y)
+                        if self.tracker.p1_detected:
+                            self._calibration_samples_p1.append(self.tracker.p1_raw_y)
+                        if self.tracker.p2_detected:
+                            self._calibration_samples_p2.append(self.tracker.p2_raw_y)
 
                         elapsed = now - self._calibration_start_time
                         progress = min(1.0, elapsed / max(0.1, self.config.calibration_duration_sec))
@@ -702,13 +831,23 @@ class VisionPipeline:
                             self._finish_calibration()
 
     def _finish_calibration(self) -> None:
-        """Computes calibrated baseline from accumulated samples."""
+        """Computes calibrated baseline from accumulated samples for all active players."""
         self._calibrating = False
-        if self._calibration_samples:
-            median_y = float(np.median(self._calibration_samples))
-            self.tracker.calibrate_baseline(median_y)
+        if self._calibration_samples_p1:
+            median_y_p1 = float(np.median(self._calibration_samples_p1))
+            self.tracker.calibrate_baseline(median_y_p1, player_idx=1)
+        if self._calibration_samples_p2:
+            median_y_p2 = float(np.median(self._calibration_samples_p2))
+            self.tracker.calibrate_baseline(median_y_p2, player_idx=2)
+        elif self._calibration_samples_p1:
+            median_y_p1 = float(np.median(self._calibration_samples_p1))
+            self.tracker.calibrate_baseline(median_y_p1, player_idx=2)
+
         self._state.is_calibrated = True
-        logger.info("Calibration finished with %d samples", len(self._calibration_samples))
+        logger.info(
+            "Calibration finished: P1 samples=%d, P2 samples=%d",
+            len(self._calibration_samples_p1), len(self._calibration_samples_p2)
+        )
 
     def get_state(self) -> TrackingState:
         """Thread-safe snapshot copy of current tracking data."""
@@ -723,6 +862,14 @@ class VisionPipeline:
                 calibration_progress=self._state.calibration_progress,
                 is_calibrated=self._state.is_calibrated,
                 device_profile_label=self.tracker.device_profile.value,
+                face_count=self._state.face_count,
+                is_pvp=self._state.is_pvp,
+                p1_detected=self._state.p1_detected,
+                p1_raw_y=self._state.p1_raw_y,
+                p1_smoothed_y=self._state.p1_smoothed_y,
+                p2_detected=self._state.p2_detected,
+                p2_raw_y=self._state.p2_raw_y,
+                p2_smoothed_y=self._state.p2_smoothed_y,
             )
 
     def stop(self) -> None:

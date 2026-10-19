@@ -110,6 +110,34 @@ class TestVisionTracker(unittest.TestCase):
         spread_near = tracker.get_effective_range_spread(face_height_fraction=0.35)
         self.assertLess(spread_far, spread_near)
 
+    def test_dual_player_calibration(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.calibrate_baseline(neutral_y=0.40, range_spread=0.15, player_idx=1)
+        tracker.calibrate_baseline(neutral_y=0.60, range_spread=0.20, player_idx=2)
+
+        self.assertAlmostEqual(tracker._min_y_bound, 0.25, delta=0.01)
+        self.assertAlmostEqual(tracker._max_y_bound, 0.55, delta=0.01)
+        self.assertAlmostEqual(tracker._p2_min_y_bound, 0.40, delta=0.01)
+        self.assertAlmostEqual(tracker._p2_max_y_bound, 0.80, delta=0.01)
+
+    def test_process_black_frame_extra_metadata(self):
+        tracker = FaceMeshTracker(self.config)
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        detected, raw_y, smoothed_y, hud = tracker.process_frame(frame)
+        self.assertFalse(detected)
+        self.assertEqual(tracker.face_count, 0)
+        self.assertFalse(tracker.p1_detected)
+        self.assertFalse(tracker.p2_detected)
+
+    def test_vision_pipeline_pvp_state(self):
+        from facepong.vision.tracker import VisionPipeline
+        pipeline = VisionPipeline(self.config)
+        state = pipeline.get_state()
+        self.assertEqual(state.face_count, 0)
+        self.assertFalse(state.is_pvp)
+        self.assertAlmostEqual(state.p1_smoothed_y, 0.5)
+        self.assertAlmostEqual(state.p2_smoothed_y, 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

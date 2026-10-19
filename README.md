@@ -88,6 +88,14 @@ The AI opponent evaluates incoming shots using multi-bounce geometric raycasting
 - **Procedural Audio**: Real-time sound synthesis using NumPy sinusoidal and square waveform math. Generates classic arcade blips, wall reflections, goal explosions, and victory fanfares without external `.wav` or `.mp3` assets.
 - **Zero-Allocation Rendering**: Pre-rendered bloom surfaces, cached PIP buffers, and geometry-bounded double-buffering eliminate garbage collection stalls during active rallies.
 
+### 5. Multi-Player Face Tracking & Autonomous PvP (Human vs Human)
+FacePong seamlessly supports both **1-Player (Human vs AI)** and **2-Player (Human vs Human)** modes without requiring dual cameras, extra hardware, or manual menu navigation:
+- **Autonomous PvP Latch & 15s Detection Window**: While idling in Attract mode, the presence watchdog provides a 15-second window from startup or player arrival to detect a second participant. Detecting two players simultaneously for $\ge 0.8\text{ s}$ automatically routes the match into 2-Player PvP mode. If the 15-second window elapses with only a single player present, the system transitions into 1-Player vs AI (or immediately upon pressing `Space`).
+- **Single-Pass YuNet Detection**: Both players are detected within a single downscaled global inference pass ($160\times 120$) in only **~4–5 ms** on Raspberry Pi 4, preserving the full 60 FPS rendering budget.
+- **Spatial Partitioning & Natural Mirroring**: Horizontal camera flipping ensures intuitive spatial mapping: the player standing on the left in physical space controls the left paddle (Player 1, Cyan), while the player on the right controls the right paddle (Player 2, Crimson).
+- **Background Bystander Suppression**: Eliminates false positives from spectators walking behind the arena by filtering out candidates whose bounding area is smaller than 25% of the primary player's face area ($A \ge 0.25 \times A_{\max}$).
+- **Dual Independent Biometric Calibration**: Each player receives an isolated baseline calibration, distance normalization ($f_h / h$), progressive curve, and EMA smoothing filter, ensuring perfectly balanced competition regardless of differences in player height or seating distance.
+
 ---
 
 ## Hardware & System Requirements
@@ -164,22 +172,24 @@ python3 main.py --fullscreen --profile TV
 
 ### Controls Reference
 
-| Input | Action |
-| :--- | :--- |
-| **Head Tilt (Up / Down)** | Primary contactless control: steers the player paddle vertically |
-| **`T`** | Cycle device sensitivity profile (`AUTO` &rarr; `TV` &rarr; `LAPTOP` &rarr; `TABLET`) |
-| **`Space`** | Start match from attract mode or skip calibration countdown |
-| **`W` / `S`** or **`Up` / `Down`** | Manual keyboard paddle override for accessibility and testing |
-| **`D`** | Toggle real-time diagnostic performance overlay |
-| **`Esc`** | Clean application exit |
+| Input | Mode | Action |
+| :--- | :--- | :--- |
+| **Head Tilt (Left Face)** | 1P & 2P | Steers Left paddle (Player 1, Cyan) vertically |
+| **Head Tilt (Right Face)** | 2P PvP | Steers Right paddle (Player 2, Crimson) vertically |
+| **`W` / `S`** | Any | Manual keyboard override for Player 1 (Left paddle) |
+| **`Up` / `Down`** | Any | Manual keyboard override for Player 2 (Right paddle in PvP, or solo paddle in 1P) |
+| **`T`** | Any | Cycle device sensitivity profile (`AUTO` &rarr; `TV` &rarr; `LAPTOP` &rarr; `TABLET`) |
+| **`Space`** | Any | Start match from attract mode or skip calibration countdown |
+| **`D`** | Any | Toggle real-time diagnostic performance overlay |
+| **`Esc`** | Any | Clean application exit |
 
 ### Exhibition State Flow
 
 ```mermaid
 stateDiagram-v2
     [*] --> Attract
-    Attract --> Calibration : Face Detected / Space Pressed
-    Calibration --> Playing : 3s Neutral Lock
+    Attract --> Calibration : 1 Face (1P vs AI) or 2 Faces (2P PvP)
+    Calibration --> Playing : 3s Neutral Lock (Single or Dual Reticle)
     Playing --> PointScored : Ball Escapes Arena Bounds
     PointScored --> Playing : Score < Winning Score
     PointScored --> GameOver : Score >= Winning Score
@@ -187,11 +197,11 @@ stateDiagram-v2
     GameOver --> Attract : Auto-Reset (10s) / Space Pressed
 ```
 
-1. **Attract Mode**: Autonomous demonstration loop with glowing neon logo, audio calls, and presence detection.
-2. **Calibration**: 3-second neutral face lock establishing the baseline center point without deadzones.
-3. **Playing**: Intense, fluid rally action with continuous trajectory prediction and dynamic difficulty adjustment.
-4. **Presence Watchdog**: Automatically detects when a player walks away, pausing gameplay and gracefully returning to Attract mode after 5 seconds of absence.
-5. **Game Over & Stats**: Displays match duration, longest rally volley count, and celebratory visual effects.
+1. **Attract Mode**: Autonomous demonstration loop with glowing neon logo, audio calls, and real-time face detection (automatically latches 2P PvP when $\ge 2$ players are detected).
+2. **Calibration**: 3-second neutral lock establishing baseline centers; displays dual cyber reticles (Cyan & Crimson) in PvP mode.
+3. **Playing**: High-speed rally action—either against predictive trajectory DDA AI or head-to-head human PvP.
+4. **Presence Watchdog**: Automatically monitors active player presence, pausing gameplay and returning to Attract mode after 5 seconds of total absence.
+5. **Game Over & Victory**: Displays match duration, longest rally volley count, and celebratory fireworks honoring the winning player.
 
 ---
 

@@ -45,6 +45,8 @@ class CameraConfig:
     default_max_y: float = 0.54
     # Calibration countdown in seconds
     calibration_duration_sec: float = 3.0
+    # Time window (seconds) allowed in attract mode for a 2nd player to join before launching 1P vs AI
+    solo_start_delay_sec: float = 15.0
 
 
 @dataclass(frozen=True)
