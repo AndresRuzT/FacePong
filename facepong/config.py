@@ -33,11 +33,11 @@ class CameraConfig:
     flip_horizontal: bool = True
     device_profile: DeviceProfile = DeviceProfile.AUTO
     # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
-    ema_alpha: float = 0.30
-    # Sensitivity multiplier: higher = less head motion needed to move paddle across court
-    head_sensitivity: float = 2.8
+    ema_alpha: float = 0.24
+    # Sensitivity multiplier: balanced for natural, elegant head nods
+    head_sensitivity: float = 2.3
     # Calibration range spread around neutral head Y
-    default_range_spread: float = 0.10
+    default_range_spread: float = 0.12
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head range normalization defaults (fraction of frame height)
@@ -55,7 +55,7 @@ class PhysicsConfig:
     paddle_height: int = 110
     paddle_margin: int = 35
     paddle_speed_keyboard: float = 650.0  # px/sec
-    paddle_max_speed: float = 4800.0       # px/sec fast, responsive arcade speed
+    paddle_max_speed: float = 2400.0       # px/sec smooth, natural aesthetic velocity cap
     ball_radius: int = 8
     ball_serve_speed: float = 340.0       # px/sec readable, gentle launch speed on serve
     ball_initial_speed: float = 520.0     # px/sec full gameplay rally speed
