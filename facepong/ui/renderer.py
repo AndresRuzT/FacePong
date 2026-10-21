@@ -299,7 +299,7 @@ class NeonRenderer:
         Renders the outer scoreboard, AI difficulty telemetry (or PvP balance), and camera PIP
         completely outside the playing field (in the top header bar).
         """
-        header_h = self.arena_rect.top
+        header_h = 118
         # Top banner background
         header_rect = pygame.Rect(0, 0, self.width, header_h)
         pygame.draw.rect(self.screen, (10, 12, 20), header_rect)
@@ -308,7 +308,7 @@ class NeonRenderer:
         # 1. Left: Camera PIP (Completely outside arena)
         pip_w = 136
         pip_h = 92
-        pip_x = self.arena_rect.left
+        pip_x = max(24, self.arena_rect.left - 40)
         pip_y = 12
         self.render_camera_pip_box(tracking_state, (pip_x, pip_y), (pip_w, pip_h))
 
@@ -340,7 +340,7 @@ class NeonRenderer:
         # 3. Right: AI Neural Core Telemetry Meter or PvP Contest Meter
         meter_w = 175
         meter_h = 10
-        meter_x = self.arena_rect.right - meter_w
+        meter_x = min(self.width - meter_w - 24, self.arena_rect.right + 40 - meter_w)
         meter_y = 48
 
         if is_pvp:

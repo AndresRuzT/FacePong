@@ -51,11 +51,11 @@ class CameraConfig:
 
 @dataclass(frozen=True)
 class PhysicsConfig:
-    paddle_width: int = 16
-    paddle_height: int = 110
-    paddle_margin: int = 35
+    paddle_width: int = 14
+    paddle_height: int = 96
+    paddle_margin: int = 28
     paddle_speed_keyboard: float = 650.0  # px/sec
-    paddle_max_speed: float = 2400.0       # px/sec smooth, natural aesthetic velocity cap
+    paddle_max_speed: float = 3800.0       # px/sec fast, snappy response on abrupt head movements
     ball_radius: int = 8
     ball_serve_speed: float = 340.0       # px/sec readable, gentle launch speed on serve
     ball_initial_speed: float = 520.0     # px/sec full gameplay rally speed

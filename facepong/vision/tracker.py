@@ -309,12 +309,25 @@ class FaceMeshTracker:
 
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
-            # Physical downward slew-rate limiter:
-            # Prevents transient collar/neck reflections from plunging paddle down when head was raised
+
+            # Stationary noise gate: cancels camera sensor micro-quantization when head is stationary
             if not is_first and last_raw > 0:
-                max_step_down = max(0.08, 4.5 * dt_s)
+                diff_raw = abs(raw_y - last_raw)
+                if diff_raw < 0.0055:
+                    raw_y = last_raw
+                elif diff_raw < 0.016:
+                    # Smooth cubic hermite blend from deadband to active motion (zero abrupt threshold step)
+                    t = (diff_raw - 0.0055) / (0.016 - 0.0055)
+                    blend = t * t * (3.0 - 2.0 * t)
+                    raw_y = last_raw + (raw_y - last_raw) * blend
+
+            # Downward slew-rate limiter: prevents any extreme single-frame artifact (> 0.24 in < 40ms)
+            # while preserving snappy, legitimate human head flicks and fast downward nods
+            if not is_first and last_raw > 0:
+                max_step_down = max(0.24, 8.5 * dt_s)
                 if (raw_y - last_raw) > max_step_down:
                     raw_y = last_raw + max_step_down
+
             instant_vel = (raw_y - last_raw) / dt_s
             vel = 0.5 * vel + 0.5 * instant_vel
 
@@ -327,14 +340,16 @@ class FaceMeshTracker:
             smoothed = 0.5
             is_first = False
 
-        # In AUTO mode, dynamically adapt sensitivity based on distance
+        # In AUTO mode, adapt sensitivity based on physical distance with deadband hysteresis
+        # to prevent continuous micro-drift when stationary
         if self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
             target_spread = self.get_effective_range_spread(face_height / float(frame_height))
             curr_spread = 0.5 * (max_b - min_b)
-            new_spread = 0.96 * curr_spread + 0.04 * target_spread
-            mid_y = 0.5 * (min_b + max_b)
-            min_b = max(0.02, mid_y - new_spread)
-            max_b = min(0.98, mid_y + new_spread)
+            if abs(target_spread - curr_spread) > 0.012:
+                new_spread = 0.95 * curr_spread + 0.05 * target_spread
+                mid_y = 0.5 * (min_b + max_b)
+                min_b = max(0.02, mid_y - new_spread)
+                max_b = min(0.98, mid_y + new_spread)
 
         # Baseline drift if clamped at edge
         span = max(0.01, max_b - min_b)
@@ -381,14 +396,16 @@ class FaceMeshTracker:
         curved_u = sign_u * (0.80 * abs_u + 0.20 * (abs_u ** 1.25))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
-        # Single-pass adaptive EMA smoothing (gentle, silky spring interpolation)
+        # Dual-regime adaptive EMA smoothing:
+        # Stationary / micro-nods: low base alpha for silky calm and zero jitter
+        # Abrupt / fast flicks: high alpha (up to 0.92) for immediate, crisp response with zero lag
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.15) ** 1.3)
-            eff_alpha = base_alpha + (0.52 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.08) ** 1.25)
+            eff_alpha = base_alpha + (0.92 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state

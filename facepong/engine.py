@@ -107,19 +107,27 @@ class GameEngine:
         self._calibration_progress = 0.0
 
     def _calculate_arena_geometry(self, w: int, h: int) -> None:
-        """Computes rectangular playfield arena leaving top header for HUD/PIP and shortening width by 15%."""
+        """Computes compact, interactive rectangular playfield arena avoiding excessive head excursion."""
         header_h = 118
+        margin_b = 20
+        available_h = max(200, h - header_h - margin_b)
+        # Compact arena height (~74% of available vertical space) for interactive, effortless rallies
+        arena_h = max(180, int(available_h * 0.74))
+        # Center arena vertically between top header and bottom screen edge
+        vertical_offset = (available_h - arena_h) // 2
+        arena_top = header_h + vertical_offset
+
         margin_x = 24
-        margin_b = 18
         available_w = max(300, w - 2 * margin_x)
-        # Shorten horizontal distance by an additional 15% (30% total) for compact, intense rallies
-        arena_w = int(available_w * 0.72)
+        # Compact arena width for fast, snappy, interactive rallies
+        arena_w = max(240, int(available_w * 0.58))
         arena_left = (w - arena_w) // 2
+
         self.arena_rect = pygame.Rect(
             arena_left,
-            header_h,
+            arena_top,
             arena_w,
-            max(200, h - header_h - margin_b),
+            arena_h,
         )
 
     def _on_window_resize(self, new_w: int, new_h: int) -> None:
