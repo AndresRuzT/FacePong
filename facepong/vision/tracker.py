@@ -194,37 +194,40 @@ class FaceMeshTracker:
         return self.device_profile
 
     def _init_detector(self) -> None:
-        """Initializes MediaPipe Face Mesh (multi-face) and OpenCV YuNet DNN."""
-        # 1. MediaPipe Solutions FaceMesh (high-precision multi-face landmarks)
+        """Initializes OpenCV YuNet DNN as primary detector (edge-optimized for Raspberry Pi 4)."""
+        # 1. OpenCV YuNet Deep Neural Network Face & Landmark Detector (Fast, lightweight edge architecture)
         try:
-            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                    max_num_faces=4,
-                    refine_landmarks=False,
-                    min_detection_confidence=0.25,
-                    min_tracking_confidence=0.25,
-                )
-                logger.info("MediaPipe Face Mesh tracker initialized (Multi-face max=4)")
-        except Exception as exc:
-            logger.debug("MediaPipe Solutions initialization failed (%s).", exc)
-
-        # 2. OpenCV YuNet Deep Neural Network Face & Landmark Detector
-        try:
-            cv2.setNumThreads(4)
+            # Use 2 threads so 2 CPU cores remain completely dedicated to 60 FPS Pygame render loop on Raspberry Pi
+            cv2.setNumThreads(2)
             current_dir = os.path.dirname(os.path.abspath(__file__))
             yunet_path = os.path.join(current_dir, "face_detection_yunet_2023mar.onnx")
             if os.path.exists(yunet_path) and hasattr(cv2, "FaceDetectorYN"):
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(320, 240),
-                    score_threshold=0.20,
+                    input_size=(160, 120),
+                    score_threshold=0.45,
                     nms_threshold=0.3,
-                    top_k=10,
+                    top_k=6,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (320x240, 4 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized (160x120, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
+
+        # 2. MediaPipe Solutions FaceMesh (fallback ONLY if YuNet is unavailable)
+        if self._yunet is None:
+            try:
+                if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+                    self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                        max_num_faces=2,
+                        refine_landmarks=False,
+                        min_detection_confidence=0.35,
+                        min_tracking_confidence=0.35,
+                    )
+                    logger.info("MediaPipe Face Mesh tracker initialized as fallback (max=2)")
+            except Exception as exc:
+                logger.debug("MediaPipe Solutions initialization failed (%s).", exc)
+
 
         # 3. OpenCV Haar Cascade as emergency fallback
         try:
@@ -244,7 +247,7 @@ class FaceMeshTracker:
             logger.warning("OpenCV Cascade initialization error: %s", exc)
 
         if self._face_mesh is None and self._yunet is None and self._cascade is None:
-            logger.error("No face tracking backend available! Neither MediaPipe, YuNet, nor OpenCV Haar Cascade could be loaded.")
+            logger.error("No face tracking backend available! Neither YuNet, MediaPipe, nor OpenCV Haar Cascade could be loaded.")
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
@@ -306,6 +309,12 @@ class FaceMeshTracker:
 
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
+            # Physical downward slew-rate limiter:
+            # Prevents transient collar/neck reflections from plunging paddle down when head was raised
+            if not is_first and last_raw > 0:
+                max_step_down = max(0.08, 4.5 * dt_s)
+                if (raw_y - last_raw) > max_step_down:
+                    raw_y = last_raw + max_step_down
             instant_vel = (raw_y - last_raw) / dt_s
             vel = 0.5 * vel + 0.5 * instant_vel
 
@@ -435,8 +444,8 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
 
-        # ─── 2. MediaPipe Face Mesh fallback (Runs if YuNet absent or found 0 faces) ───
-        if not faces and self._face_mesh is not None:
+        # ─── 2. MediaPipe Face Mesh fallback (Runs ONLY if YuNet is absent) ───
+        elif self._face_mesh is not None:
             try:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb_frame.flags.writeable = False
@@ -461,8 +470,8 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("MediaPipe multi-face exception: %s", exc)
 
-        # ─── 3. Haar Cascade fallback ───
-        if not faces and self._cascade is not None and not self._cascade.empty():
+        # ─── 3. Haar Cascade fallback (Runs ONLY if YuNet and MediaPipe are absent) ───
+        elif self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
                 faces.append({
@@ -472,8 +481,8 @@ class FaceMeshTracker:
                     "nose_x": fx + fw * 0.5, "nose_y": fy + fh * 0.5,
                 })
 
-        # Filter out tiny noise (faces < 16px)
-        faces = [f for f in faces if f.get("fh", 20) >= 16 and f.get("fw", 20) >= 16]
+        # Filter out tiny noise (faces < 14px)
+        faces = [f for f in faces if f.get("fh", 20) >= 14 and f.get("fw", 20) >= 14]
 
         # Robust independent spatial binning: Left (P1) vs Right (P2)
         # Guarantees Player 2's paddle updates at full FPS without interference or lag from Player 1
@@ -481,25 +490,42 @@ class FaceMeshTracker:
         p1_candidates = [f for f in faces if f["center_x"] < mid_x]
         p2_candidates = [f for f in faces if f["center_x"] >= mid_x]
 
-        if p1_candidates and p2_candidates:
-            p1_face = max(p1_candidates, key=lambda f: f["fw"] * f["fh"])
-            p2_face = max(p2_candidates, key=lambda f: f["fw"] * f["fh"])
-        elif len(faces) >= 2:
-            # Both players are slightly on one side: sort horizontally
-            faces.sort(key=lambda f: f["center_x"])
-            p1_face = faces[0]
-            p2_face = faces[1]
-        elif len(faces) == 1:
-            # Solo player: can be anywhere in frame
-            p1_face = faces[0]
-            p2_face = None
+        if self.is_pvp:
+            # In 2-Player mode: STRICT spatial segregation.
+            # Player 1 is exclusively from the left half; Player 2 exclusively from the right half.
+            # A momentary drop or upward head tilt NEVER cross-contaminates or assigns P2's face to P1!
+            p1_face = p1_candidates[0] if p1_candidates else None
+            p2_face = p2_candidates[0] if p2_candidates else None
+            active_count = (1 if p1_face is not None else 0) + (1 if p2_face is not None else 0)
+            self.face_count = active_count
         else:
-            p1_face = None
-            p2_face = None
-
-        active_count = (1 if p1_face is not None else 0) + (1 if p2_face is not None else 0)
-        self.face_count = active_count
-        self.is_pvp = (self.face_count >= 2)
+            # In Solo / Attract mode:
+            if p1_candidates and p2_candidates:
+                p1_face = p1_candidates[0]
+                p2_face = p2_candidates[0]
+                self.face_count = 2
+                self.is_pvp = True
+            elif len(faces) == 1:
+                # Solo player anywhere in frame
+                p1_face = faces[0]
+                p2_face = None
+                self.face_count = 1
+                self.is_pvp = False
+            elif len(faces) >= 2:
+                # Multiple candidates on one side (e.g. spectator or false positive)
+                # Pick the one closest to previous tracked position if known, else largest
+                if self._p1_last_valid_raw_y > 0:
+                    p1_face = min(faces, key=lambda f: abs(f["raw_y"] - self._p1_last_valid_raw_y))
+                else:
+                    p1_face = max(faces, key=lambda f: f["fw"] * f["fh"])
+                p2_face = None
+                self.face_count = 1
+                self.is_pvp = False
+            else:
+                p1_face = None
+                p2_face = None
+                self.face_count = 0
+                self.is_pvp = False
 
         # Update Player 1 state
         if p1_face is not None:
@@ -538,18 +564,13 @@ class FaceMeshTracker:
     def _yunet_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
         """
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
-        Filters background bystanders and returns sorted face list (leftmost first).
+        Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Run detection at 320x240 for optimal multi-face resolution and sensitive capture
-        net_w, net_h = 320, 240
-        if w != net_w or h != net_h:
-            detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
-            detect_scale_x = w / float(net_w)
-            detect_scale_y = h / float(net_h)
-        else:
-            detect_frame = frame
-            detect_scale_x = 1.0
-            detect_scale_y = 1.0
+        # Run detection at 160x120 for optimal frame rate (~3-5ms) on Raspberry Pi 4 CPU
+        net_w, net_h = 160, 120
+        detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
+        detect_scale_x = w / float(net_w)
+        detect_scale_y = h / float(net_h)
 
         self._yunet.setInputSize((net_w, net_h))
         _, faces = self._yunet.detect(detect_frame)
@@ -559,15 +580,15 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.20:
+            if score < 0.45:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
             fw = float(face[2] * detect_scale_x)
             fh = float(face[3] * detect_scale_y)
 
-            # Minimum size threshold: face must be at least 16px
-            if fh < 16 or fw < 16:
+            # Minimum size threshold: face must be at least 14px in original frame space
+            if fh < 14 or fw < 14:
                 continue
 
             # Key landmarks
@@ -582,11 +603,11 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # Mid-face anatomical anchor weighted towards nose tip for responsive downward pitch
+            # Mid-face anatomical anchor: rigid skull landmarks (nose tip + glabella)
+            # Immune to bounding box expansions onto the neck/collar when tilting the head up
             glabella_y = 0.5 * (re_y + le_y)
-            face_center_y = fy + fh * 0.5
-            anchor_y = 0.55 * nose_y + 0.25 * glabella_y + 0.20 * face_center_y
-            raw_y = float(anchor_y / h)
+            anchor_y = 0.65 * nose_y + 0.35 * glabella_y
+            raw_y = float(np.clip(anchor_y / float(h), 0.0, 1.0))
             center_x = fx + fw * 0.5
 
             results.append({
@@ -599,9 +620,26 @@ class FaceMeshTracker:
                 "score": score,
             })
 
+        if not results:
+            return []
+
+        # Deduplicate vertical artifacts (e.g. neck/chest detection below true face)
+        # If two candidates share almost the same X coordinate (|x1 - x2| < 0.16 * w):
+        # The topmost one (smaller raw_y) is the head; discard the bottom one (chest artifact).
+        deduped = []
+        results.sort(key=lambda f: f["raw_y"])
+        for cand in results:
+            is_chest_artifact = False
+            for kept in deduped:
+                if abs(cand["center_x"] - kept["center_x"]) < (0.16 * w):
+                    is_chest_artifact = True
+                    break
+            if not is_chest_artifact:
+                deduped.append(cand)
+
         # Sort horizontally: leftmost is first, rightmost is last
-        results.sort(key=lambda f: f["center_x"])
-        return results
+        deduped.sort(key=lambda f: f["center_x"])
+        return deduped
 
     def _yunet_detect_2phase(
         self, frame: np.ndarray, w: int, h: int,
@@ -671,7 +709,7 @@ class FaceMeshTracker:
         """Renders dual-player HUD preview overlay with independent P1 (cyan) and P2 (crimson) bounding reticles."""
         preview_h = self.config.preview_height
         preview_w = self.config.preview_width
-        hud_frame = cv2.resize(frame, (preview_w, preview_h), interpolation=cv2.INTER_LINEAR)
+        hud_frame = cv2.resize(frame, (preview_w, preview_h), interpolation=cv2.INTER_NEAREST)
         hud_frame = cv2.convertScaleAbs(hud_frame, alpha=0.45, beta=0)
 
         scale_x = preview_w / float(w)

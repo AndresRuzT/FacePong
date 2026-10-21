@@ -395,7 +395,7 @@ class NeonRenderer:
             buf_id = id(raw_rgb)
             target_size = (pw - 4, ph - 22)
             if self._cached_pip_id != buf_id or self._cached_pip_size != target_size:
-                cam_surface = pygame.image.frombuffer(raw_rgb.tobytes(), (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
+                cam_surface = pygame.image.frombuffer(raw_rgb.data, (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
                 self._cached_pip_surface = pygame.transform.scale(cam_surface, target_size)
                 self._cached_pip_id = buf_id
                 self._cached_pip_size = target_size

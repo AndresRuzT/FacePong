@@ -158,6 +158,45 @@ class TestVisionTracker(unittest.TestCase):
         self.assertAlmostEqual(tracker.p1_raw_y, 0.45)
         self.assertAlmostEqual(tracker.p2_raw_y, 0.55)
 
+    def test_pvp_spatial_isolation_prevents_face_swapping_on_drop(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.is_pvp = True
+
+        # Frame 1: Both P1 and P2 detected
+        faces_both = [
+            {"raw_y": 0.30, "center_x": 80.0, "fx": 60.0, "fy": 60.0, "fw": 40.0, "fh": 50.0},
+            {"raw_y": 0.60, "center_x": 240.0, "fx": 220.0, "fy": 120.0, "fw": 40.0, "fh": 50.0},
+        ]
+        tracker._yunet_detect_multi = lambda f, w, h: faces_both
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        tracker.process_frame(frame)
+        self.assertAlmostEqual(tracker.p1_raw_y, 0.30)
+        self.assertAlmostEqual(tracker.p2_raw_y, 0.60)
+
+        # Frame 2: Player 1 raises head and drops out; only Player 2 remains on right
+        faces_only_p2 = [
+            {"raw_y": 0.60, "center_x": 240.0, "fx": 220.0, "fy": 120.0, "fw": 40.0, "fh": 50.0},
+        ]
+        tracker._yunet_detect_multi = lambda f, w, h: faces_only_p2
+        tracker.process_frame(frame)
+
+        # Crucial: P1 raw_y must NOT jump to P2's 0.60 position!
+        self.assertAlmostEqual(tracker.p1_raw_y, 0.30)
+        self.assertAlmostEqual(tracker.p2_raw_y, 0.60)
+
+    def test_slew_rate_limiter_prevents_downward_spike_when_pitching_up(self):
+        tracker = FaceMeshTracker(self.config)
+        now = 100.0
+        # Initialize at raised head position (raw_y = 0.25)
+        tracker._update_player_state(0.25, 60.0, 240, now, player_idx=1)
+        self.assertAlmostEqual(tracker._p1_last_valid_raw_y, 0.25)
+
+        # Sudden anomalous downward spike to 0.70 after 30ms (simulating chest artifact)
+        dt = 0.033
+        smoothed = tracker._update_player_state(0.70, 60.0, 240, now + dt, player_idx=1)
+        # Slew-rate limiter should prevent raw_y from jumping straight to 0.70
+        self.assertLess(tracker._p1_last_valid_raw_y, 0.45)
+
 
 if __name__ == "__main__":
     unittest.main()
