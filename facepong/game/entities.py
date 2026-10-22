@@ -70,10 +70,10 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.clamp_target()
 
-    def update(self, dt: float, smooth_time: float = 0.032, smooth_factor: Optional[float] = None) -> None:
+    def update(self, dt: float, smooth_time: float = 0.045, smooth_factor: Optional[float] = None) -> None:
         """
         Critically damped spring interpolation (SmoothDamp) towards target coordinate.
-        Ultra-low latency (32ms) bridges camera frames to 60 FPS refresh with zero lag and zero jumps.
+        Balanced 45ms damping bridges camera frames to 60 FPS refresh with zero lag and zero jumps.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))

@@ -178,12 +178,12 @@ class FaceMeshTracker:
     def get_effective_ema_alpha(self) -> float:
         """Returns baseline EMA smoothing factor tuned for device ergonomics."""
         if self.device_profile == DeviceProfile.TV:
-            return 0.40
+            return 0.32
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.38
+            return 0.28
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.35
-        return getattr(self.config, "ema_alpha", 0.38)
+            return 0.24
+        return getattr(self.config, "ema_alpha", 0.28)
 
     def cycle_device_profile(self) -> DeviceProfile:
         """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
@@ -210,12 +210,12 @@ class FaceMeshTracker:
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(192, 144),
+                    input_size=(200, 150),
                     score_threshold=0.20,
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (192x144, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized (200x150, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -400,18 +400,18 @@ class FaceMeshTracker:
         u = 2.0 * (linear_y - 0.5)
         abs_u = abs(u)
         sign_u = 1.0 if u >= 0 else -1.0
-        curved_u = sign_u * (0.88 * abs_u + 0.12 * (abs_u ** 1.2))
+        curved_u = sign_u * (0.75 * abs_u + 0.25 * (abs_u ** 1.30))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
-        # Ultra-low latency adaptive EMA smoothing:
-        # Base alpha 0.38 for calm stability; scales dynamically up to 0.75 for instant 1:1 response
+        # Single-pass adaptive EMA smoothing:
+        # Balanced base alpha for calm, steady stability (zero jitter); scales dynamically on flicks (zero lag)
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.08) ** 1.0)
-            eff_alpha = base_alpha + (0.75 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.10) ** 1.1)
+            eff_alpha = base_alpha + (0.55 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -477,25 +477,12 @@ class FaceMeshTracker:
                 if results and results.multi_face_landmarks:
                     for fl in results.multi_face_landmarks:
                         landmarks = fl.landmark
-                        # Anatomical facial landmarks with hybrid pitch boost
-                        re_pt = landmarks[33]
-                        le_pt = landmarks[263]
-                        eye_x = 0.5 * (re_pt.x + le_pt.x) * w
-                        eye_y = 0.5 * (re_pt.y + le_pt.y) * h
-
-                        rm_pt = landmarks[61]
-                        lm_pt = landmarks[291]
-                        mouth_y = 0.5 * (rm_pt.y + lm_pt.y) * h
-
-                        nose_pt = landmarks[NOSE_TIP_IDX]
-                        nose_x = nose_pt.x * w
-                        nose_y = nose_pt.y * h
-
-                        anchor_y = 0.60 * nose_y + 0.40 * eye_y
-                        face_pos_y = anchor_y / float(h)
-                        face_h = max(10.0, mouth_y - eye_y)
-                        pitch_delta = (nose_y - eye_y) / face_h - 0.58
-                        ry = float(np.clip(face_pos_y + 0.45 * pitch_delta, 0.05, 0.95))
+                        # Anatomical facial landmarks: nose tip + glabella
+                        nose_point = landmarks[NOSE_TIP_IDX]
+                        glabella_point = landmarks[GLABELLA_IDX]
+                        ry = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
+                        nose_x = nose_point.x * w
+                        nose_y = nose_point.y * h
 
                         det_fh = abs(landmarks[152].y - landmarks[10].y) * h
                         det_fw = abs(landmarks[454].x - landmarks[234].x) * w
@@ -651,13 +638,11 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # High precision skull anchor with pitch nod amplification
-            eye_y = 0.5 * (re_y + le_y)
-            anchor_y = 0.60 * nose_y + 0.40 * eye_y
-            face_pos_y = anchor_y / float(h)
-            face_h = max(10.0, 0.5 * (rm_y + lm_y) - eye_y)
-            pitch_delta = (nose_y - eye_y) / face_h - 0.58
-            raw_y = float(np.clip(face_pos_y + 0.45 * pitch_delta, 0.05, 0.95))
+            # Anatomical mid-face anchor: combines eyes + face center + nose tip for strong vertical responsiveness
+            glabella_y = 0.5 * (re_y + le_y)
+            face_center_y = fy + fh * 0.5
+            anchor_y = 0.40 * glabella_y + 0.35 * face_center_y + 0.25 * nose_y
+            raw_y = float(anchor_y / float(h))
 
             center_x = fx + fw * 0.5
 
