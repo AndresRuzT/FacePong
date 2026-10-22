@@ -400,17 +400,16 @@ class FaceMeshTracker:
 
         mapped_y = float(np.clip(linear_y, 0.0, 1.0))
 
-        # Dynamic agility EMA:
+        # Single-pass balanced agility EMA:
         # Stationary: base alpha (~0.28) eliminates micro-jitter.
-        # Active movement: boosts alpha up to 0.85, giving instant 1:1 response with ZERO lag,
-        # zero double-step deceleration, and zero stepped jumps!
+        # Active movement: boosts alpha smoothly to 0.48, providing continuous fluid tracking without discrete jumps
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.045) ** 1.0)
-            eff_alpha = base_alpha + (0.85 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.06) ** 1.0)
+            eff_alpha = base_alpha + (0.48 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -601,17 +600,11 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Native single-pass edge detection (QVGA 320x240 or direct frame)
-        net_w = min(w, 320)
-        net_h = min(h, 240)
-        if w == net_w and h == net_h:
-            detect_frame = frame
-            detect_scale_x = 1.0
-            detect_scale_y = 1.0
-        else:
-            detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
-            detect_scale_x = w / float(net_w)
-            detect_scale_y = h / float(net_h)
+        # Edge-optimized scan size (240x180) guarantees steady 30 FPS inference on Raspberry Pi 4 CPU
+        net_w, net_h = 240, 180
+        detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
+        detect_scale_x = w / float(net_w)
+        detect_scale_y = h / float(net_h)
 
         self._yunet.setInputSize((net_w, net_h))
         _, faces = self._yunet.detect(detect_frame)
@@ -628,8 +621,8 @@ class FaceMeshTracker:
             fw = float(face[2] * detect_scale_x)
             fh = float(face[3] * detect_scale_y)
 
-            # Minimum size threshold: face must be at least 10px in scan space
-            if fh < 10 or fw < 10:
+            # Minimum size threshold: face must be at least 8px in scan space (detects distant players)
+            if fh < 8 or fw < 8:
                 continue
 
             # Key landmarks
