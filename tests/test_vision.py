@@ -318,6 +318,39 @@ class TestVisionTracker(unittest.TestCase):
         self.assertLess(s2, s1)
         self.assertLess(s2, 0.35)
 
+    def test_one_euro_filter_stationary_noise_reduction(self):
+        from facepong.vision.tracker import OneEuroFilter
+        filt = OneEuroFilter(min_cutoff=1.0, beta=18.0)
+        t = 10.0
+        # Initialize
+        filt.filter(0.50, t)
+
+        # Feed sensor jitter around 0.50
+        samples = [0.502, 0.498, 0.503, 0.497, 0.501, 0.499]
+        filtered = []
+        for s in samples:
+            t += 0.033
+            val, _ = filt.filter(s, t)
+            filtered.append(val)
+
+        # Output fluctuations must be significantly smaller than input noise
+        inp_variance = max(samples) - min(samples)
+        out_variance = max(filtered) - min(filtered)
+        self.assertLess(out_variance, inp_variance * 0.45)
+
+    def test_one_euro_filter_high_speed_zero_lag(self):
+        from facepong.vision.tracker import OneEuroFilter
+        filt = OneEuroFilter(min_cutoff=1.0, beta=18.0)
+        t = 10.0
+        filt.filter(0.50, t)
+
+        # Fast head flick: jumps from 0.50 to 0.85 in 66ms (2 frames)
+        t += 0.033
+        v1, vel1 = filt.filter(0.85, t)
+        # Filter cutoff should ramp up immediately and track closely without lag
+        self.assertGreater(v1, 0.70)
+        self.assertGreater(vel1, 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()

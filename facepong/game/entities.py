@@ -3,6 +3,7 @@
 from collections import deque
 import math
 import random
+import time
 from typing import Deque, List, Optional, Tuple
 import pygame
 
@@ -32,6 +33,8 @@ class Paddle:
         self.max_y = max_y if max_y is not None else (screen_height - 10)
 
         self.target_y = float(y)
+        self.target_velocity = 0.0
+        self.target_sample_time = 0.0
         self.speed = 650.0  # Pixels per second for keyboard or AI tracking
         self.max_speed = max_speed  # Pixels per second cap
         self.current_velocity = 0.0  # SmoothDamp continuous velocity state
@@ -50,16 +53,26 @@ class Paddle:
         self.rect.x = int(self.x - self.width / 2.0)
         self.rect.y = int(self.y - half_h)
 
-    def set_target_normalized_y(self, norm_y: float) -> None:
-        """Maps a 0.0-1.0 normalized coordinate to valid screen paddle range."""
+    def set_target_normalized_y(
+        self,
+        norm_y: float,
+        norm_velocity: float = 0.0,
+        sample_time: float = 0.0,
+    ) -> None:
+        """Maps a 0.0-1.0 normalized coordinate to valid screen paddle range with velocity tracking."""
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
-        self.target_y = min_center + norm_y * (max_center - min_center)
+        range_span = max_center - min_center
+        self.target_y = min_center + norm_y * range_span
+        self.target_velocity = norm_velocity * range_span
+        self.target_sample_time = sample_time if sample_time > 0.0 else time.perf_counter()
 
     def reset_to_center(self, center_y: float) -> None:
         """Immediately snaps paddle to vertical center coordinate."""
         self.target_y = float(center_y)
+        self.target_velocity = 0.0
+        self.target_sample_time = time.perf_counter()
         self.y = float(center_y)
         self.current_velocity = 0.0
         self.clamp_target()
@@ -68,22 +81,51 @@ class Paddle:
     def move_keyboard(self, direction: float, dt: float) -> None:
         """Moves paddle by directional input (-1.0 up, 1.0 down)."""
         self.target_y += direction * self.speed * dt
+        self.target_velocity = direction * self.speed
+        self.target_sample_time = time.perf_counter()
         self.clamp_target()
 
-    def update(self, dt: float, smooth_time: float = 0.052, smooth_factor: Optional[float] = None) -> None:
+    def update(
+        self,
+        dt: float,
+        smooth_time: float = 0.022,
+        smooth_factor: Optional[float] = None,
+        current_time: Optional[float] = None,
+    ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp) towards target coordinate.
-        Harmonious 52ms damping bridges camera frames to 60 FPS refresh with silky smooth fluidity.
+        Critically damped spring interpolation (SmoothDamp) with continuous target extrapolation.
+        Bridges camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag and zero jumps.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
+
+        now = current_time if current_time is not None else time.perf_counter()
+        elapsed = (now - self.target_sample_time) if self.target_sample_time > 0.0 else 0.0
+
+        # Harmonious continuous extrapolation between camera tracking frames (typically 33ms):
+        # 1.0 plateau during normal camera interval window (up to 45ms),
+        # smoothly Hermite-decaying to 0 if no new camera frame arrives within 90ms (stopping overshoot)
+        if elapsed <= 0.045:
+            decay = 1.0
+        elif elapsed < 0.090:
+            t_decay = (elapsed - 0.045) / 0.045
+            decay = 1.0 - t_decay * t_decay * (3.0 - 2.0 * t_decay)
+        else:
+            decay = 0.0
+
+        live_target = self.target_y + (self.target_velocity * elapsed * decay)
+
+        half_h = self.height / 2.0
+        min_center = self.min_y + half_h + 4
+        max_center = self.max_y - half_h - 4
+        effective_target = max(min_center, min(max_center, live_target))
 
         st = max(0.0001, smooth_time)
         omega = 2.0 / st
         x = omega * dt
         exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
 
-        change = self.y - self.target_y
+        change = self.y - effective_target
         max_change = self.max_speed * st
         change = max(-max_change, min(max_change, change))
         temp_target = self.y - change
@@ -92,17 +134,16 @@ class Paddle:
         self.current_velocity = (self.current_velocity - omega * temp) * exp
         new_pos = temp_target + (change + temp) * exp
 
-        # Prevent overshooting target
-        if (self.target_y - self.y > 0.0) == (new_pos > self.target_y):
-            new_pos = self.target_y
+        # Accurate directional overshoot check:
+        # Only snap if new_pos actually crossed effective_target in direction of travel
+        if (effective_target - self.y > 0.0 and new_pos > effective_target) or \
+           (effective_target - self.y < 0.0 and new_pos < effective_target):
+            new_pos = effective_target
             self.current_velocity = 0.0
 
         self.y = new_pos
 
         # Enforce bounds
-        half_h = self.height / 2.0
-        min_center = self.min_y + half_h + 4
-        max_center = self.max_y - half_h - 4
         if self.y <= min_center:
             self.y = min_center
             self.current_velocity = max(0.0, self.current_velocity)

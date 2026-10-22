@@ -212,6 +212,8 @@ class GameEngine:
             if p1_dir != 0.0:
                 self._keyboard_p1_active = True
                 self.player_paddle.move_keyboard(p1_dir, dt)
+            else:
+                self._keyboard_p1_active = False
 
             p2_dir = 0.0
             if keys[pygame.K_UP]:
@@ -221,6 +223,8 @@ class GameEngine:
             if p2_dir != 0.0:
                 self._keyboard_p2_active = True
                 self.ai_paddle.move_keyboard(p2_dir, dt)
+            else:
+                self._keyboard_p2_active = False
         else:
             move_dir = 0.0
             if keys[pygame.K_w] or keys[pygame.K_UP]:
@@ -231,6 +235,8 @@ class GameEngine:
             if move_dir != 0.0:
                 self._keyboard_active = True
                 self.player_paddle.move_keyboard(move_dir, dt)
+            else:
+                self._keyboard_active = False
 
     def _update(self, dt: float) -> None:
         """Updates game state machine, physics, and entities."""
@@ -264,12 +270,24 @@ class GameEngine:
         if state == ExhibitionState.PLAYING:
             if self.state_mgr.is_pvp:
                 if tracking_state.p1_detected and not self._keyboard_p1_active:
-                    self.player_paddle.set_target_normalized_y(tracking_state.p1_smoothed_y)
+                    self.player_paddle.set_target_normalized_y(
+                        tracking_state.p1_smoothed_y,
+                        tracking_state.p1_velocity_y,
+                        tracking_state.sample_time,
+                    )
                 if tracking_state.p2_detected and not self._keyboard_p2_active:
-                    self.ai_paddle.set_target_normalized_y(tracking_state.p2_smoothed_y)
+                    self.ai_paddle.set_target_normalized_y(
+                        tracking_state.p2_smoothed_y,
+                        tracking_state.p2_velocity_y,
+                        tracking_state.sample_time,
+                    )
             else:
                 if tracking_state.face_detected and not self._keyboard_active:
-                    self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
+                    self.player_paddle.set_target_normalized_y(
+                        tracking_state.smoothed_y,
+                        tracking_state.velocity_y,
+                        tracking_state.sample_time,
+                    )
 
         # Update particle effects
         self.particles.update(dt)
@@ -318,12 +336,24 @@ class GameEngine:
         """Executes calibration countdown before match start."""
         if self.state_mgr.is_pvp:
             if tracking_state.p1_detected:
-                self.player_paddle.set_target_normalized_y(tracking_state.p1_smoothed_y)
+                self.player_paddle.set_target_normalized_y(
+                    tracking_state.p1_smoothed_y,
+                    tracking_state.p1_velocity_y,
+                    tracking_state.sample_time,
+                )
             if tracking_state.p2_detected:
-                self.ai_paddle.set_target_normalized_y(tracking_state.p2_smoothed_y)
+                self.ai_paddle.set_target_normalized_y(
+                    tracking_state.p2_smoothed_y,
+                    tracking_state.p2_velocity_y,
+                    tracking_state.sample_time,
+                )
         else:
             if tracking_state.face_detected:
-                self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
+                self.player_paddle.set_target_normalized_y(
+                    tracking_state.smoothed_y,
+                    tracking_state.velocity_y,
+                    tracking_state.sample_time,
+                )
 
         self.player_paddle.update(dt)
         self.ai_paddle.update(dt)

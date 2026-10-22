@@ -133,6 +133,51 @@ class TestPhysicsAndEntities(unittest.TestCase):
         self.assertIsNone(renderer.match_result)
         self.assertEqual(renderer.shake_offset, (0, 0))
 
+    def test_paddle_continuous_extrapolation_smoothness(self):
+        """Verifies that 30 FPS camera updates driving 60 FPS paddle produce uniform, silky smooth steps."""
+        paddle = Paddle(x=50, y=200, width=16, height=100, min_y=50, max_y=670, screen_height=720)
+        paddle.reset_to_center(200.0)
+
+        # Simulate 30 FPS camera updates moving at normalized vel = 1.0/s
+        # across 60 FPS Pygame render loop
+        cam_dt = 1.0 / 30.0
+        render_dt = 1.0 / 60.0
+
+        dys = []
+        prev_y = paddle.y
+        norm_vel = 1.0
+        t_base = 100.0
+
+        for frame in range(16):
+            now = t_base + frame * render_dt
+            if frame % 2 == 0:
+                norm_y = 0.3 + norm_vel * (now - t_base)
+                paddle.set_target_normalized_y(norm_y, norm_vel, now)
+
+            paddle.update(render_dt, current_time=now)
+            dys.append(paddle.y - prev_y)
+            prev_y = paddle.y
+
+        # After initial acceleration settling (frames 7 to 15), steps should be uniform without alternating jumps
+        active_steps = dys[7:16]
+        for s in active_steps:
+            self.assertGreater(s, 0.0)
+        import numpy as np
+        std_dev = float(np.std(active_steps))
+        # Step variance must be less than 0.1 px (zero stepped jumps)
+        self.assertLess(std_dev, 0.1)
+
+    def test_paddle_directional_overshoot_preserves_motion(self):
+        """Verifies that moving towards target does not prematurely zero out velocity."""
+        paddle = Paddle(x=50, y=200, width=16, height=100, min_y=50, max_y=670, screen_height=720)
+        paddle.reset_to_center(200.0)
+        paddle.target_y = 400.0
+        # 1 update step towards 400
+        paddle.update(0.016)
+        # Position advanced and velocity is actively positive
+        self.assertGreater(paddle.y, 200.0)
+        self.assertGreater(paddle.current_velocity, 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

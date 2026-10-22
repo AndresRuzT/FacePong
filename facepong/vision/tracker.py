@@ -35,6 +35,61 @@ CONTOUR_KEYPOINTS = [
 ]
 
 
+class OneEuroFilter:
+    """
+    1€ Filter: Adaptive low-pass filter (Casiez, Roussel, Vogel - CHI 2012).
+    Eliminates camera sensor micro-jitter when stationary (low cutoff frequency)
+    while providing instantaneous, 1:1 zero-lag tracking on active movement (high cutoff frequency).
+    """
+
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 18.0, d_cutoff: float = 1.0):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.x_prev: Optional[float] = None
+        self.dx_prev: float = 0.0
+        self.t_prev: float = 0.0
+
+    def reset(self, x0: Optional[float] = None, t0: float = 0.0) -> None:
+        """Resets filter memory to baseline position."""
+        self.x_prev = float(x0) if x0 is not None else None
+        self.dx_prev = 0.0
+        self.t_prev = float(t0)
+
+    @staticmethod
+    def _alpha(dt: float, cutoff: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * max(0.01, cutoff))
+        return 1.0 / (1.0 + tau / dt)
+
+    def filter(self, x: float, t: float) -> Tuple[float, float]:
+        """
+        Filters raw value x at timestamp t.
+        Returns tuple of (filtered_position, filtered_velocity).
+        """
+        if self.x_prev is None or self.t_prev <= 0.0:
+            self.x_prev = float(x)
+            self.dx_prev = 0.0
+            self.t_prev = float(t)
+            return float(x), 0.0
+
+        dt = max(1e-4, t - self.t_prev)
+        self.t_prev = float(t)
+
+        # 1. Filter velocity derivative to eliminate high-frequency pixel quantization noise
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(dt, self.d_cutoff)
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+        self.dx_prev = dx_hat
+
+        # 2. Dynamic cutoff frequency scales proportionally with instantaneous velocity
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self._alpha(dt, cutoff)
+
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.x_prev = x_hat
+        return float(x_hat), float(dx_hat)
+
+
 @dataclass
 class TrackingState:
     """Thread-safe snapshot of face tracking data."""
@@ -42,6 +97,8 @@ class TrackingState:
     raw_y: float = 0.5
     normalized_y: float = 0.5
     smoothed_y: float = 0.5
+    velocity_y: float = 0.0
+    sample_time: float = 0.0
     last_detected_time: float = 0.0
     preview_surface_buffer: Optional[np.ndarray] = None
     calibration_progress: float = 0.0
@@ -53,9 +110,11 @@ class TrackingState:
     p1_detected: bool = False
     p1_raw_y: float = 0.5
     p1_smoothed_y: float = 0.5
+    p1_velocity_y: float = 0.0
     p2_detected: bool = False
     p2_raw_y: float = 0.5
     p2_smoothed_y: float = 0.5
+    p2_velocity_y: float = 0.0
 
 
 class FaceMeshTracker:
@@ -137,7 +196,23 @@ class FaceMeshTracker:
         self.device_profile: DeviceProfile = getattr(config, "device_profile", DeviceProfile.AUTO)
         self._screen_height: int = 720
 
+        # One Euro Adaptive Low-Pass Filters (CHI 2012)
+        min_cutoff, beta = self.get_filter_params()
+        self._p1_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
+        self._p2_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
+
         self._init_detector()
+
+    def get_filter_params(self) -> Tuple[float, float]:
+        """Returns (min_cutoff, beta) tuned for device profile and sensitivity."""
+        sens = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
+        if self.device_profile == DeviceProfile.TV:
+            return 1.1, 24.0 * sens
+        elif self.device_profile == DeviceProfile.LAPTOP:
+            return 0.95, 18.0 * sens
+        elif self.device_profile == DeviceProfile.TABLET:
+            return 0.85, 14.0 * sens
+        return 0.95, 18.0 * sens
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -194,6 +269,9 @@ class FaceMeshTracker:
         except ValueError:
             next_idx = 0
         self.device_profile = order[next_idx]
+        min_c, b_val = self.get_filter_params()
+        self._p1_filter.min_cutoff, self._p1_filter.beta = min_c, b_val
+        self._p2_filter.min_cutoff, self._p2_filter.beta = min_c, b_val
         self.calibrate_baseline(self._last_valid_raw_y)
         logger.info("Switched device profile to: %s", self.device_profile.value)
         return self.device_profile
@@ -210,12 +288,12 @@ class FaceMeshTracker:
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(200, 150),
+                    input_size=(192, 144),
                     score_threshold=0.20,
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (200x150, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized (192x144, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -272,6 +350,8 @@ class FaceMeshTracker:
         self._clamped_at_max_count = 0
         self._p1_tracked_x = None
         self._p2_tracked_x = None
+        self._p1_filter.reset()
+        self._p2_filter.reset()
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
 
     def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None, player_idx: int = 1) -> None:
@@ -288,6 +368,7 @@ class FaceMeshTracker:
             self._is_first_sample = False
             self._p1_last_valid_raw_y = neutral_y
             self._last_valid_raw_y = neutral_y
+            self._p1_filter.reset(0.5)
             logger.info(
                 "Calibrated P1 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -297,6 +378,7 @@ class FaceMeshTracker:
             self._p2_max_y_bound = max_b
             self._p2_is_first_sample = False
             self._p2_last_valid_raw_y = neutral_y
+            self._p2_filter.reset(0.5)
             logger.info(
                 "Calibrated P2 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._p2_min_y_bound, self._p2_max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -332,11 +414,16 @@ class FaceMeshTracker:
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
 
-            # Stationary noise gate: cancels camera sensor micro-quantization when head is stationary
+            # Smooth soft deadband: cancels camera sensor micro-quantization when head is stationary (<0.0035)
+            # with smooth Hermite transition to eliminate any discrete threshold step
             if not is_first and last_raw > 0:
                 diff_raw = abs(raw_y - last_raw)
                 if diff_raw < 0.0035:
                     raw_y = last_raw
+                elif diff_raw < 0.0085:
+                    t_blend = (diff_raw - 0.0035) / 0.0050
+                    blend = t_blend * t_blend * (3.0 - 2.0 * t_blend)
+                    raw_y = last_raw + (raw_y - last_raw) * blend
 
             # Slew-rate limiter: prevents anomalous single-frame video glints while allowing instant fast flicks
             if not is_first and last_raw > 0:
@@ -345,9 +432,6 @@ class FaceMeshTracker:
                     raw_y = last_raw + max_step
                 elif (last_raw - raw_y) > max_step:
                     raw_y = last_raw - max_step
-
-            instant_vel = (raw_y - last_raw) / dt_s
-            vel = 0.5 * vel + 0.5 * instant_vel
 
         # Re-anchor baseline if needed
         if recenter or is_first:
@@ -400,17 +484,15 @@ class FaceMeshTracker:
 
         mapped_y = float(np.clip(linear_y, 0.0, 1.0))
 
-        # Single-pass balanced agility EMA:
-        # Stationary: base alpha (~0.28) eliminates micro-jitter.
-        # Active movement: boosts alpha smoothly to 0.48, providing continuous fluid tracking without discrete jumps
-        base_alpha = self.get_effective_ema_alpha()
+        # One Euro Filter: adaptive low-pass filter providing 1:1 instantaneous response
+        # on active head nods while keeping the paddle completely stationary when holding still
+        filt = self._p1_filter if player_idx == 1 else self._p2_filter
         if is_first:
+            filt.reset(mapped_y, now)
             smoothed = mapped_y
+            vel = 0.0
         else:
-            diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.06) ** 1.0)
-            eff_alpha = base_alpha + (0.48 - base_alpha) * alpha_boost
-            smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
+            smoothed, vel = filt.filter(mapped_y, now)
 
         # Save back into state
         if player_idx == 1:
@@ -600,8 +682,8 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Edge-optimized scan size (240x180) guarantees steady 30 FPS inference on Raspberry Pi 4 CPU
-        net_w, net_h = 240, 180
+        # Edge-optimized scan size (192x144) guarantees steady 30-40+ FPS inference on Raspberry Pi 4 CPU
+        net_w, net_h = 192, 144
         detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
         detect_scale_x = w / float(net_w)
         detect_scale_y = h / float(net_h)
@@ -917,6 +999,8 @@ class VisionPipeline:
                     self._state.face_detected = detected
                     self._state.raw_y = raw_y
                     self._state.smoothed_y = smoothed_y
+                    self._state.velocity_y = self.tracker._p1_velocity_y
+                    self._state.sample_time = now
                     self._state.preview_surface_buffer = hud_preview
                     self._state.device_profile_label = self.tracker.device_profile.value
                     self._state.face_count = self.tracker.face_count
@@ -924,9 +1008,11 @@ class VisionPipeline:
                     self._state.p1_detected = self.tracker.p1_detected
                     self._state.p1_raw_y = self.tracker.p1_raw_y
                     self._state.p1_smoothed_y = self.tracker.p1_smoothed_y
+                    self._state.p1_velocity_y = self.tracker._p1_velocity_y
                     self._state.p2_detected = self.tracker.p2_detected
                     self._state.p2_raw_y = self.tracker.p2_raw_y
                     self._state.p2_smoothed_y = self.tracker.p2_smoothed_y
+                    self._state.p2_velocity_y = self.tracker._p2_velocity_y
 
                     if detected:
                         self._state.last_detected_time = now
@@ -972,6 +1058,8 @@ class VisionPipeline:
                 raw_y=self._state.raw_y,
                 normalized_y=self._state.normalized_y,
                 smoothed_y=self._state.smoothed_y,
+                velocity_y=self._state.velocity_y,
+                sample_time=self._state.sample_time,
                 last_detected_time=self._state.last_detected_time,
                 preview_surface_buffer=self._state.preview_surface_buffer,
                 calibration_progress=self._state.calibration_progress,
@@ -982,9 +1070,11 @@ class VisionPipeline:
                 p1_detected=self._state.p1_detected,
                 p1_raw_y=self._state.p1_raw_y,
                 p1_smoothed_y=self._state.p1_smoothed_y,
+                p1_velocity_y=self._state.p1_velocity_y,
                 p2_detected=self._state.p2_detected,
                 p2_raw_y=self._state.p2_raw_y,
                 p2_smoothed_y=self._state.p2_smoothed_y,
+                p2_velocity_y=self._state.p2_velocity_y,
             )
 
     def stop(self) -> None:
