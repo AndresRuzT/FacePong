@@ -184,6 +184,33 @@ class TestVisionTracker(unittest.TestCase):
         self.assertAlmostEqual(tracker.p1_raw_y, 0.30)
         self.assertAlmostEqual(tracker.p2_raw_y, 0.60)
 
+    def test_pvp_nearest_neighbor_prevents_swap_when_p2_is_near_center(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.is_pvp = True
+
+        # Frame 1: Both P1 (at 60px) and P2 (at 155px in 320px width -> slightly left of mid_x=160px)
+        faces_both = [
+            {"raw_y": 0.35, "center_x": 60.0, "fx": 40.0, "fy": 60.0, "fw": 40.0, "fh": 50.0},
+            {"raw_y": 0.75, "center_x": 155.0, "fx": 135.0, "fy": 70.0, "fw": 40.0, "fh": 50.0},
+        ]
+        tracker._yunet_detect_multi = lambda f, w, h: faces_both
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        tracker.process_frame(frame)
+        self.assertAlmostEqual(tracker.p1_raw_y, 0.35)
+        self.assertAlmostEqual(tracker.p2_raw_y, 0.75)
+
+        # Frame 2: P1 temporarily drops out. Only P2 at 155px remains.
+        faces_only_p2 = [
+            {"raw_y": 0.75, "center_x": 155.0, "fx": 135.0, "fy": 70.0, "fw": 40.0, "fh": 50.0},
+        ]
+        tracker._yunet_detect_multi = lambda f, w, h: faces_only_p2
+        tracker.process_frame(frame)
+
+        # Even though 155 < 160 (mid_x), nearest-neighbor correctly identifies this as P2!
+        self.assertTrue(tracker.p2_detected)
+        self.assertAlmostEqual(tracker.p2_raw_y, 0.75)
+        self.assertAlmostEqual(tracker.p1_raw_y, 0.35)
+
     def test_slew_rate_limiter_prevents_downward_spike_when_pitching_up(self):
         tracker = FaceMeshTracker(self.config)
         now = 100.0
@@ -208,6 +235,78 @@ class TestVisionTracker(unittest.TestCase):
         tracker._update_player_state(0.503, 60.0, 240, now + 0.033, player_idx=1)
         # Position should remain completely clamped to 0.50 (zero jitter)
         self.assertAlmostEqual(tracker._p1_last_valid_raw_y, 0.50)
+
+    def test_pitch_ratio_vector_projection_invariant_to_center_of_gravity_crouch(self):
+        tracker = FaceMeshTracker(self.config)
+        # Mock YuNet returning 5 landmarks: right_eye, left_eye, nose, right_mouth, left_mouth
+        # Face at y=100
+        face_upright = np.array([
+            [80, 80, 40, 50, 90, 100, 110, 100, 100, 115, 92, 125, 108, 125, 0.85]
+        ], dtype=np.float32)
+
+        # Same face shifted down 50 pixels (squatting / lowering center of gravity)
+        face_crouch = np.array([
+            [80, 130, 40, 50, 90, 150, 110, 150, 100, 165, 92, 175, 108, 175, 0.85]
+        ], dtype=np.float32)
+
+        class MockYuNet:
+            def __init__(self, faces): self._faces = faces
+            def setInputSize(self, size): pass
+            def detect(self, img): return True, self._faces
+
+        tracker._yunet = MockYuNet(face_upright)
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        res_upright = tracker._yunet_detect_multi(frame, 320, 240)
+        p_upright = res_upright[0]["raw_y"]
+
+        tracker._yunet = MockYuNet(face_crouch)
+        res_crouch = tracker._yunet_detect_multi(frame, 320, 240)
+        p_crouch = res_crouch[0]["raw_y"]
+
+        # Crucial: Lowering center of gravity must NOT change pitch ratio
+        self.assertAlmostEqual(p_upright, 0.60, delta=0.01)
+        self.assertAlmostEqual(p_crouch, p_upright, delta=0.001)
+
+    def test_pitch_ratio_responds_to_head_nods(self):
+        tracker = FaceMeshTracker(self.config)
+        # Nod UP: nose shifts up towards eyes
+        face_nod_up = np.array([
+            [80, 80, 40, 50, 90, 100, 110, 100, 100, 110, 92, 125, 108, 125, 0.85]
+        ], dtype=np.float32)
+        # Nod DOWN: nose shifts down towards mouth
+        face_nod_down = np.array([
+            [80, 80, 40, 50, 90, 100, 110, 100, 100, 120, 92, 125, 108, 125, 0.85]
+        ], dtype=np.float32)
+
+        class MockYuNet:
+            def __init__(self, faces): self._faces = faces
+            def setInputSize(self, size): pass
+            def detect(self, img): return True, self._faces
+
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        tracker._yunet = MockYuNet(face_nod_up)
+        r_up = tracker._yunet_detect_multi(frame, 320, 240)[0]["raw_y"]
+        tracker._yunet = MockYuNet(face_nod_down)
+        r_down = tracker._yunet_detect_multi(frame, 320, 240)[0]["raw_y"]
+
+        self.assertLess(r_up, 0.50)      # Nod UP -> smaller pitch ratio (paddle moves UP)
+        self.assertGreater(r_down, 0.70)  # Nod DOWN -> larger pitch ratio (paddle moves DOWN)
+
+    def test_no_baseline_drift_when_holding_clamped_angle(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.calibrate_baseline(neutral_y=0.58, range_spread=0.10)
+        initial_min = tracker._min_y_bound
+        initial_max = tracker._max_y_bound
+
+        # Hold head at extreme low angle (raw_y = 0.80 > max_b = 0.68) for 30 consecutive frames
+        t = 100.0
+        for _ in range(30):
+            t += 0.033
+            tracker._update_player_state(0.80, 60.0, 240, t, player_idx=1)
+
+        # Baseline bounds must remain solidly anchored without drifting
+        self.assertAlmostEqual(tracker._min_y_bound, initial_min, delta=0.001)
+        self.assertAlmostEqual(tracker._max_y_bound, initial_max, delta=0.001)
 
 
 if __name__ == "__main__":

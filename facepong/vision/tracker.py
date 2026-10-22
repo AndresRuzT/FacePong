@@ -92,6 +92,10 @@ class FaceMeshTracker:
         self._p2_velocity_y: float = 0.0
         self._p2_last_raw_y_sample_time: float = 0.0
 
+        # Player horizontal reference tracking
+        self._p1_tracked_x: Optional[float] = None
+        self._p2_tracked_x: Optional[float] = None
+
         # Backwards compatible alias for single player
         self._smoothed_y: float = 0.5
         self._is_first_sample: bool = True
@@ -257,6 +261,8 @@ class FaceMeshTracker:
         self._yunet_roi_miss = 0
         self._clamped_at_min_count = 0
         self._clamped_at_max_count = 0
+        self._p1_tracked_x = None
+        self._p2_tracked_x = None
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
 
     def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None, player_idx: int = 1) -> None:
@@ -268,6 +274,10 @@ class FaceMeshTracker:
         if player_idx == 1:
             self._min_y_bound = min_b
             self._max_y_bound = max_b
+            self._p1_is_first_sample = False
+            self._is_first_sample = False
+            self._p1_last_valid_raw_y = neutral_y
+            self._last_valid_raw_y = neutral_y
             logger.info(
                 "Calibrated P1 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -275,6 +285,8 @@ class FaceMeshTracker:
         else:
             self._p2_min_y_bound = min_b
             self._p2_max_y_bound = max_b
+            self._p2_is_first_sample = False
+            self._p2_last_valid_raw_y = neutral_y
             logger.info(
                 "Calibrated P2 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._p2_min_y_bound, self._p2_max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -315,18 +327,20 @@ class FaceMeshTracker:
                 diff_raw = abs(raw_y - last_raw)
                 if diff_raw < 0.0035:
                     raw_y = last_raw
-                elif diff_raw < 0.010:
+                elif diff_raw < 0.012:
                     # Smooth cubic hermite blend from deadband to active motion (zero abrupt threshold step)
-                    t = (diff_raw - 0.0035) / (0.010 - 0.0035)
+                    t = (diff_raw - 0.0035) / (0.012 - 0.0035)
                     blend = t * t * (3.0 - 2.0 * t)
                     raw_y = last_raw + (raw_y - last_raw) * blend
 
-            # Downward slew-rate limiter: prevents any extreme single-frame artifact (> 0.25 in < 40ms)
+            # Slew-rate limiter: prevents any extreme single-frame artifact (> 0.25 in < 40ms)
             # while preserving snappy, legitimate human head flicks and fast downward nods
             if not is_first and last_raw > 0:
-                max_step_down = max(0.25, 9.0 * dt_s)
-                if (raw_y - last_raw) > max_step_down:
-                    raw_y = last_raw + max_step_down
+                max_step = max(0.25, 9.0 * dt_s)
+                if (raw_y - last_raw) > max_step:
+                    raw_y = last_raw + max_step
+                elif (last_raw - raw_y) > max_step:
+                    raw_y = last_raw - max_step
 
             instant_vel = (raw_y - last_raw) / dt_s
             vel = 0.5 * vel + 0.5 * instant_vel
@@ -345,46 +359,38 @@ class FaceMeshTracker:
         if self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
             target_spread = self.get_effective_range_spread(face_height / float(frame_height))
             curr_spread = 0.5 * (max_b - min_b)
-            if abs(target_spread - curr_spread) > 0.010:
+            if abs(target_spread - curr_spread) > 0.012:
                 new_spread = 0.95 * curr_spread + 0.05 * target_spread
                 mid_y = 0.5 * (min_b + max_b)
                 min_b = max(0.02, mid_y - new_spread)
                 max_b = min(0.98, mid_y + new_spread)
 
-        # Baseline drift if clamped at edge
         span = max(0.01, max_b - min_b)
         mid_b = 0.5 * (min_b + max_b)
 
+        # Track clamped duration for telemetry only (no dynamic baseline drift during play
+        # to guarantee the paddle NEVER drifts or moves on its own while holding an angle)
         if raw_y > max_b:
             c_max += 1
-            if c_max > 8:
-                drift = (raw_y - max_b) * 0.15
-                max_b += drift
-                min_b += drift
         else:
             c_max = 0
 
         if raw_y < min_b:
             c_min += 1
-            if c_min > 8:
-                drift = (raw_y - min_b) * 0.15
-                min_b += drift
-                max_b += drift
         else:
             c_min = 0
 
         # Asymmetric pitch mapping:
-        # Looking down produces ~35% less physical pixel shift on camera due to the skull pivot axis.
-        # Asymmetric spans ensure looking up is smooth and controlled, while looking down reaches
-        # the bottom of the arena with a natural, subtle downward nod without straining the neck.
+        # Looking down is slightly stiffer on the neck than looking up.
+        # An asymmetric downward span (0.85x) makes looking down reach the bottom effortlessly.
         if raw_y <= mid_b:
-            # Looking UP: effortless responsive span (1.05x)
+            # Looking UP
             half_span_up = max(0.01, (mid_b - min_b) * 1.05)
             norm = min(1.0, max(0.0, (mid_b - raw_y) / half_span_up))
             linear_y = 0.5 - 0.5 * norm
         else:
-            # Looking DOWN: responsive span (0.75x) for easy, subtle downward nods
-            half_span_down = max(0.01, (max_b - mid_b) * 0.75)
+            # Looking DOWN: responsive span (0.85x) for easy, subtle downward nods
+            half_span_down = max(0.01, (max_b - mid_b) * 0.85)
             norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
             linear_y = 0.5 + 0.5 * norm
 
@@ -392,19 +398,18 @@ class FaceMeshTracker:
         u = 2.0 * (linear_y - 0.5)
         abs_u = abs(u)
         sign_u = 1.0 if u >= 0 else -1.0
-        curved_u = sign_u * (0.85 * abs_u + 0.15 * (abs_u ** 1.2))
+        curved_u = sign_u * (0.88 * abs_u + 0.12 * (abs_u ** 1.2))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
         # Continuous adaptive EMA smoothing:
-        # Stationary / micro-nods: low base alpha for calm stability (zero jitter)
-        # Active flicks: dynamic alpha (up to 0.60) for continuous, silky response (zero jumping)
+        # Smooth and steady base alpha for zero jitter; capped at 0.38 for buttery fluid motion with zero jumps
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.09) ** 1.1)
-            eff_alpha = base_alpha + (0.60 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.14) ** 1.1)
+            eff_alpha = base_alpha + (0.38 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -470,18 +475,44 @@ class FaceMeshTracker:
                 if results and results.multi_face_landmarks:
                     for fl in results.multi_face_landmarks:
                         landmarks = fl.landmark
-                        nose = landmarks[NOSE_TIP_IDX]
-                        glabella = landmarks[GLABELLA_IDX]
-                        ry = float(0.65 * nose.y + 0.35 * glabella.y)
+                        # Anatomical facial landmarks for vector pitch projection:
+                        # Eyes: 33 (right eye), 263 (left eye)
+                        re_pt = landmarks[33]
+                        le_pt = landmarks[263]
+                        eye_x = 0.5 * (re_pt.x + le_pt.x) * w
+                        eye_y = 0.5 * (re_pt.y + le_pt.y) * h
+
+                        # Mouth: 61 (right mouth), 291 (left mouth)
+                        rm_pt = landmarks[61]
+                        lm_pt = landmarks[291]
+                        mouth_x = 0.5 * (rm_pt.x + lm_pt.x) * w
+                        mouth_y = 0.5 * (rm_pt.y + lm_pt.y) * h
+
+                        # Nose tip: 1
+                        nose_pt = landmarks[NOSE_TIP_IDX]
+                        nose_x = nose_pt.x * w
+                        nose_y = nose_pt.y * h
+
+                        vx = mouth_x - eye_x
+                        vy = mouth_y - eye_y
+                        v_sq = vx * vx + vy * vy
+                        ux = nose_x - eye_x
+                        uy = nose_y - eye_y
+
+                        if v_sq > 1e-4:
+                            ry = float(np.clip((ux * vx + uy * vy) / v_sq, 0.10, 0.95))
+                        else:
+                            ry = 0.58
+
                         det_fh = abs(landmarks[152].y - landmarks[10].y) * h
                         det_fw = abs(landmarks[454].x - landmarks[234].x) * w
                         faces.append({
                             "raw_y": ry,
-                            "center_x": nose.x * w,
-                            "fx": nose.x * w - det_fw * 0.5,
-                            "fy": nose.y * h - det_fh * 0.5,
+                            "center_x": nose_x,
+                            "fx": nose_x - det_fw * 0.5,
+                            "fy": nose_y - det_fh * 0.5,
                             "fw": det_fw, "fh": det_fh,
-                            "nose_x": nose.x * w, "nose_y": nose.y * h,
+                            "nose_x": nose_x, "nose_y": nose_y,
                         })
             except Exception as exc:
                 logger.debug("MediaPipe multi-face exception: %s", exc)
@@ -500,36 +531,48 @@ class FaceMeshTracker:
         # Filter out tiny noise (faces < 14px)
         faces = [f for f in faces if f.get("fh", 20) >= 14 and f.get("fw", 20) >= 14]
 
+        # Prioritize the 2 largest faces in foreground to ignore background spectators/passersby
+        if len(faces) > 2:
+            faces.sort(key=lambda f: f["fw"] * f["fh"], reverse=True)
+            faces = faces[:2]
+
         # Horizontal ordering: Leftmost is Player 1, Rightmost is Player 2
-        # Avoids rigid mid_x cutoffs that fail if players stand slightly off-center
-        mid_x = w * 0.5
         faces.sort(key=lambda f: f["center_x"])
 
+        # Running horizontal spatial tracking for P1 and P2
+        p1_ref_x = self._p1_tracked_x if self._p1_tracked_x is not None else (0.35 * w)
+        p2_ref_x = self._p2_tracked_x if self._p2_tracked_x is not None else (0.65 * w)
+
         if len(faces) >= 2:
-            # 2 or more faces: leftmost is P1, rightmost is P2 (as long as separated by >= 10% width)
             p1_cand = faces[0]
             p2_cand = faces[-1]
-            if (p2_cand["center_x"] - p1_cand["center_x"]) >= (0.10 * w):
+            if (p2_cand["center_x"] - p1_cand["center_x"]) >= (0.08 * w):
                 p1_face = p1_cand
                 p2_face = p2_cand
+                self._p1_tracked_x = 0.85 * p1_ref_x + 0.15 * p1_face["center_x"]
+                self._p2_tracked_x = 0.85 * p2_ref_x + 0.15 * p2_face["center_x"]
             else:
-                # Too close horizontally (single player with duplicate detection): keep largest
                 p1_face = max(faces, key=lambda f: f["fw"] * f["fh"])
                 p2_face = None
         elif len(faces) == 1:
             cand = faces[0]
             if self.is_pvp:
-                # In 2-Player mode, determine whether this single face is P1 or P2 based on position
-                # If closer to left half (< 0.5 * w), it's P1; otherwise P2
-                if cand["center_x"] < mid_x:
+                # Nearest-neighbor matching to previous player position:
+                # Guarantees Player 2 NEVER gets swapped into Player 1 when standing near center
+                d1 = abs(cand["center_x"] - p1_ref_x)
+                d2 = abs(cand["center_x"] - p2_ref_x)
+                if d1 <= d2:
                     p1_face = cand
                     p2_face = None
+                    self._p1_tracked_x = 0.85 * p1_ref_x + 0.15 * p1_face["center_x"]
                 else:
                     p1_face = None
                     p2_face = cand
+                    self._p2_tracked_x = 0.85 * p2_ref_x + 0.15 * p2_face["center_x"]
             else:
                 p1_face = cand
                 p2_face = None
+                self._p1_tracked_x = 0.85 * p1_ref_x + 0.15 * p1_face["center_x"]
         else:
             p1_face = None
             p2_face = None
@@ -615,11 +658,28 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # Mid-face anatomical anchor: rigid skull landmarks (nose tip + glabella)
-            # Immune to bounding box expansions onto the neck/collar when tilting the head up
-            glabella_y = 0.5 * (re_y + le_y)
-            anchor_y = 0.65 * nose_y + 0.35 * glabella_y
-            raw_y = float(np.clip(anchor_y / float(h), 0.0, 1.0))
+            # True anatomical head pitch via vector dot-product projection:
+            eye_x = 0.5 * (re_x + le_x)
+            eye_y = 0.5 * (re_y + le_y)
+            mouth_x = 0.5 * (rm_x + lm_x)
+            mouth_y = 0.5 * (rm_y + lm_y)
+            vx = mouth_x - eye_x
+            vy = mouth_y - eye_y
+            v_sq = vx * vx + vy * vy
+
+            ux = nose_x - eye_x
+            uy = nose_y - eye_y
+
+            if v_sq > 1e-4:
+                # Normalized dot-product projection:
+                # 100% invariant to bodily translation (squatting, crouching, lowering center of gravity)
+                # 100% invariant to distance / scale and head roll
+                # Neutral is ~0.58; Head UP: drops towards ~0.45; Head DOWN: rises towards ~0.75
+                pitch_ratio = float((ux * vx + uy * vy) / v_sq)
+                raw_y = float(np.clip(pitch_ratio, 0.10, 0.95))
+            else:
+                raw_y = 0.58
+
             center_x = fx + fw * 0.5
 
             results.append({
@@ -637,9 +697,9 @@ class FaceMeshTracker:
 
         # Deduplicate vertical artifacts (e.g. neck/chest detection below true face)
         # If two candidates share almost the same X coordinate (|x1 - x2| < 0.16 * w):
-        # The topmost one (smaller raw_y) is the head; discard the bottom one (chest artifact).
+        # The topmost one in the camera image (smaller fy) is the head; discard the bottom one (chest artifact).
         deduped = []
-        results.sort(key=lambda f: f["raw_y"])
+        results.sort(key=lambda f: f["fy"])
         for cand in results:
             is_chest_artifact = False
             for kept in deduped:

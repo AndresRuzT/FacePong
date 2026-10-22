@@ -33,16 +33,16 @@ class CameraConfig:
     flip_horizontal: bool = True
     device_profile: DeviceProfile = DeviceProfile.AUTO
     # EMA smoothing alpha: base smoothing for idle/micro-jitter elimination
-    ema_alpha: float = 0.28
+    ema_alpha: float = 0.24
     # Sensitivity multiplier: balanced for natural, elegant head nods
-    head_sensitivity: float = 3.0
-    # Calibration range spread around neutral head Y
-    default_range_spread: float = 0.080
+    head_sensitivity: float = 2.5
+    # Calibration range spread around neutral head pitch
+    default_range_spread: float = 0.140
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
-    # Head range normalization defaults (fraction of frame height)
-    default_min_y: float = 0.46
-    default_max_y: float = 0.54
+    # Head pitch normalization defaults around neutral ~0.58
+    default_min_y: float = 0.44
+    default_max_y: float = 0.72
     # Calibration countdown in seconds
     calibration_duration_sec: float = 3.0
     # Time window (seconds) allowed in attract mode for a 2nd player to join before launching 1P vs AI
