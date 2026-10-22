@@ -254,6 +254,13 @@ class FaceMeshTracker:
         if self._face_mesh is None and self._yunet is None and self._cascade is None:
             logger.error("No face tracking backend available! Neither YuNet, MediaPipe, nor OpenCV Haar Cascade could be loaded.")
 
+    def set_pvp_mode(self, is_pvp: bool) -> None:
+        """Explicitly sets or clears 2-player competitive PvP mode."""
+        self.is_pvp = is_pvp
+        if not is_pvp:
+            self.p2_detected = False
+            self._p2_tracked_x = None
+
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
         self._recenter_needed = True
@@ -330,11 +337,6 @@ class FaceMeshTracker:
                 diff_raw = abs(raw_y - last_raw)
                 if diff_raw < 0.0035:
                     raw_y = last_raw
-                elif diff_raw < 0.010:
-                    # Smooth cubic hermite blend from deadband to active motion (zero abrupt threshold step)
-                    t = (diff_raw - 0.0035) / (0.010 - 0.0035)
-                    blend = t * t * (3.0 - 2.0 * t)
-                    raw_y = last_raw + (raw_y - last_raw) * blend
 
             # Slew-rate limiter: prevents anomalous single-frame video glints while allowing instant fast flicks
             if not is_first and last_raw > 0:
@@ -382,7 +384,7 @@ class FaceMeshTracker:
         else:
             c_min = 0
 
-        # Asymmetric pitch mapping:
+        # Linear ergonomic pitch mapping:
         # Looking down is slightly stiffer on the neck than looking up.
         # An asymmetric downward span (0.85x) makes looking down reach the bottom effortlessly.
         if raw_y <= mid_b:
@@ -396,22 +398,19 @@ class FaceMeshTracker:
             norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
             linear_y = 0.5 + 0.5 * norm
 
-        # Progressive sensitivity curve (direct, responsive center without deadzone)
-        u = 2.0 * (linear_y - 0.5)
-        abs_u = abs(u)
-        sign_u = 1.0 if u >= 0 else -1.0
-        curved_u = sign_u * (0.75 * abs_u + 0.25 * (abs_u ** 1.30))
-        mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
+        mapped_y = float(np.clip(linear_y, 0.0, 1.0))
 
-        # Single-pass adaptive EMA smoothing:
-        # Balanced base alpha for calm, steady stability (zero jitter); scales dynamically on flicks (zero lag)
+        # Dynamic agility EMA:
+        # Stationary: base alpha (~0.28) eliminates micro-jitter.
+        # Active movement: boosts alpha up to 0.85, giving instant 1:1 response with ZERO lag,
+        # zero double-step deceleration, and zero stepped jumps!
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.10) ** 1.1)
-            eff_alpha = base_alpha + (0.55 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.045) ** 1.0)
+            eff_alpha = base_alpha + (0.85 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -536,7 +535,8 @@ class FaceMeshTracker:
                 p2_face = None
         elif len(faces) == 1:
             cand = faces[0]
-            if self.is_pvp:
+            # If in PvP and Player 2 was seen recently (<1.5s), perform nearest-neighbor association
+            if self.is_pvp and (now - self._p2_last_valid_detection_time < 1.5):
                 # Nearest-neighbor matching to previous player position:
                 # Guarantees Player 2 NEVER gets swapped into Player 1 when standing near center
                 d1 = abs(cand["center_x"] - p1_ref_x)
@@ -601,11 +601,17 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Run detection at 192x144 for ultra-fast zero-drop recognition (~12ms) on Raspberry Pi 4 CPU
-        net_w, net_h = 192, 144
-        detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
-        detect_scale_x = w / float(net_w)
-        detect_scale_y = h / float(net_h)
+        # Native single-pass edge detection (QVGA 320x240 or direct frame)
+        net_w = min(w, 320)
+        net_h = min(h, 240)
+        if w == net_w and h == net_h:
+            detect_frame = frame
+            detect_scale_x = 1.0
+            detect_scale_y = 1.0
+        else:
+            detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
+            detect_scale_x = w / float(net_w)
+            detect_scale_y = h / float(net_h)
 
         self._yunet.setInputSize((net_w, net_h))
         _, faces = self._yunet.detect(detect_frame)
@@ -888,6 +894,12 @@ class VisionPipeline:
     def recenter_baseline(self) -> None:
         """Forces tracker to re-anchor neutral position on next frame."""
         self.tracker.reset_for_new_camera()
+
+    def set_pvp_mode(self, is_pvp: bool) -> None:
+        """Sets or resets PvP mode in tracker and thread-safe tracking state."""
+        with self._lock:
+            self._state.is_pvp = is_pvp
+        self.tracker.set_pvp_mode(is_pvp)
 
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS with instant event-driven wakeup."""

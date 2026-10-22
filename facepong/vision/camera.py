@@ -331,11 +331,6 @@ class ThreadedCamera:
                     with self._lock:
                         self._latest_frame = frame
                     self.frame_ready_event.set()
-
-                    # Periodically check if preferred USB camera was plugged in
-                    if not self.is_external_usb and (now - self._last_usb_check > 2.0):
-                        self._last_usb_check = now
-                        self._check_for_usb_hotplug()
                 else:
                     self._consecutive_failures += 1
                     if self._consecutive_failures >= 6:

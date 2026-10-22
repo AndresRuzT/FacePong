@@ -287,6 +287,37 @@ class TestVisionTracker(unittest.TestCase):
         self.assertAlmostEqual(tracker._min_y_bound, initial_min, delta=0.001)
         self.assertAlmostEqual(tracker._max_y_bound, initial_max, delta=0.001)
 
+    def test_set_pvp_mode_clears_dual_player_state(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.is_pvp = True
+        tracker.p2_detected = True
+        tracker._p2_tracked_x = 240.0
+
+        tracker.set_pvp_mode(False)
+        self.assertFalse(tracker.is_pvp)
+        self.assertFalse(tracker.p2_detected)
+        self.assertIsNone(tracker._p2_tracked_x)
+
+    def test_fluid_upward_nod_tracking_is_snappy_and_continuous(self):
+        tracker = FaceMeshTracker(self.config)
+        tracker.calibrate_baseline(neutral_y=0.50, range_spread=0.10)
+        t = 100.0
+        # Initialize at neutral center
+        tracker._update_player_state(0.50, 60.0, 240, t, player_idx=1)
+        self.assertAlmostEqual(tracker.p1_smoothed_y, 0.50, delta=0.02)
+
+        # Move head upward to raw_y = 0.44 (a smooth upward nod)
+        t += 0.033
+        s1 = tracker._update_player_state(0.44, 60.0, 240, t, player_idx=1)
+        # Should be moving upward immediately without lag or deadband pause
+        self.assertLess(s1, 0.50)
+
+        t += 0.033
+        s2 = tracker._update_player_state(0.44, 60.0, 240, t, player_idx=1)
+        # By frame 2, smoothed_y should have smoothly and closely tracked the target
+        self.assertLess(s2, s1)
+        self.assertAlmostEqual(s2, 0.20, delta=0.08)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,6 +196,7 @@ class GameEngine:
                     if self.state_mgr.current_state == ExhibitionState.ATTRACT:
                         tracking_state = self.vision.get_state()
                         self.state_mgr.is_pvp = (tracking_state.face_count >= 2)
+                        self.vision.set_pvp_mode(self.state_mgr.is_pvp)
                         self.state_mgr.change_state(ExhibitionState.CALIBRATING)
                     elif self.state_mgr.current_state == ExhibitionState.GAME_OVER:
                         self.state_mgr.reset_to_attract()
@@ -251,9 +252,12 @@ class GameEngine:
 
         # Detect transition into CALIBRATING
         if state == ExhibitionState.CALIBRATING and self._previous_state != ExhibitionState.CALIBRATING:
+            self.vision.set_pvp_mode(self.state_mgr.is_pvp)
             self.vision.begin_calibration()
             self._last_calibration_second = -1
             self._calibration_progress = 0.0
+        elif state == ExhibitionState.ATTRACT and self._previous_state != ExhibitionState.ATTRACT:
+            self.vision.set_pvp_mode(False)
         self._previous_state = state
 
         # Update player paddle(s) from face tracking during active gameplay
@@ -312,6 +316,15 @@ class GameEngine:
 
     def _update_calibration_mode(self, dt: float, tracking_state: TrackingState) -> None:
         """Executes calibration countdown before match start."""
+        if self.state_mgr.is_pvp:
+            if tracking_state.p1_detected:
+                self.player_paddle.set_target_normalized_y(tracking_state.p1_smoothed_y)
+            if tracking_state.p2_detected:
+                self.ai_paddle.set_target_normalized_y(tracking_state.p2_smoothed_y)
+        else:
+            if tracking_state.face_detected:
+                self.player_paddle.set_target_normalized_y(tracking_state.smoothed_y)
+
         self.player_paddle.update(dt)
         self.ai_paddle.update(dt)
 
