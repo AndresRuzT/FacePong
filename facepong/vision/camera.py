@@ -340,6 +340,7 @@ class ThreadedCamera:
                     self._consecutive_failures += 1
                     if self._consecutive_failures >= 6:
                         self._handle_disconnect()
+                    time.sleep(0.01)
             else:
                 # Offline: generate synthetic placeholder
                 synth = self._generate_synthetic_frame()
@@ -351,11 +352,7 @@ class ThreadedCamera:
                 if now - self._last_reconnect_attempt > 1.5:
                     self._last_reconnect_attempt = now
                     self._attempt_reconnect()
-
-            elapsed = time.perf_counter() - loop_start
-            sleep_time = frame_interval - elapsed
-            if sleep_time > 0.001:
-                time.sleep(sleep_time)
+                time.sleep(0.033)
 
     def _generate_synthetic_frame(self) -> np.ndarray:
         """Generates a mock video frame when physical camera is unavailable."""

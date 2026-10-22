@@ -112,6 +112,7 @@ class FaceMeshTracker:
 
         # Grace period & adaptive recentering state
         self._recenter_needed: bool = False
+        self._is_calibrated: bool = False
         self._clamped_at_min_count: int = 0
         self._clamped_at_max_count: int = 0
         self._last_valid_raw_y: float = 0.5
@@ -177,12 +178,12 @@ class FaceMeshTracker:
     def get_effective_ema_alpha(self) -> float:
         """Returns baseline EMA smoothing factor tuned for device ergonomics."""
         if self.device_profile == DeviceProfile.TV:
-            return 0.30
+            return 0.40
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.28
+            return 0.38
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.24
-        return getattr(self.config, "ema_alpha", 0.28)
+            return 0.35
+        return getattr(self.config, "ema_alpha", 0.38)
 
     def cycle_device_profile(self) -> DeviceProfile:
         """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
@@ -209,12 +210,12 @@ class FaceMeshTracker:
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(240, 180),
-                    score_threshold=0.25,
+                    input_size=(192, 144),
+                    score_threshold=0.20,
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (240x180, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized (192x144, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -257,6 +258,7 @@ class FaceMeshTracker:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
         self._recenter_needed = True
         self._is_first_sample = True
+        self._is_calibrated = False
         self._yunet_last_box = None
         self._yunet_roi_miss = 0
         self._clamped_at_min_count = 0
@@ -271,6 +273,7 @@ class FaceMeshTracker:
             range_spread = self.get_effective_range_spread()
         min_b = max(0.02, neutral_y - range_spread)
         max_b = min(0.98, neutral_y + range_spread)
+        self._is_calibrated = True
         if player_idx == 1:
             self._min_y_bound = min_b
             self._max_y_bound = max_b
@@ -327,14 +330,13 @@ class FaceMeshTracker:
                 diff_raw = abs(raw_y - last_raw)
                 if diff_raw < 0.0035:
                     raw_y = last_raw
-                elif diff_raw < 0.012:
+                elif diff_raw < 0.010:
                     # Smooth cubic hermite blend from deadband to active motion (zero abrupt threshold step)
-                    t = (diff_raw - 0.0035) / (0.012 - 0.0035)
+                    t = (diff_raw - 0.0035) / (0.010 - 0.0035)
                     blend = t * t * (3.0 - 2.0 * t)
                     raw_y = last_raw + (raw_y - last_raw) * blend
 
-            # Slew-rate limiter: prevents any extreme single-frame artifact (> 0.25 in < 40ms)
-            # while preserving snappy, legitimate human head flicks and fast downward nods
+            # Slew-rate limiter: prevents anomalous single-frame video glints while allowing instant fast flicks
             if not is_first and last_raw > 0:
                 max_step = max(0.25, 9.0 * dt_s)
                 if (raw_y - last_raw) > max_step:
@@ -355,8 +357,8 @@ class FaceMeshTracker:
             is_first = False
 
         # In AUTO mode, adapt sensitivity based on physical distance with deadband hysteresis
-        # to prevent continuous micro-drift when stationary
-        if self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
+        # only before calibration is fixed, preventing continuous micro-drift when stationary
+        if not self._is_calibrated and self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
             target_spread = self.get_effective_range_spread(face_height / float(frame_height))
             curr_spread = 0.5 * (max_b - min_b)
             if abs(target_spread - curr_spread) > 0.012:
@@ -401,15 +403,15 @@ class FaceMeshTracker:
         curved_u = sign_u * (0.88 * abs_u + 0.12 * (abs_u ** 1.2))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
-        # Continuous adaptive EMA smoothing:
-        # Smooth and steady base alpha for zero jitter; capped at 0.38 for buttery fluid motion with zero jumps
+        # Ultra-low latency adaptive EMA smoothing:
+        # Base alpha 0.38 for calm stability; scales dynamically up to 0.75 for instant 1:1 response
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.14) ** 1.1)
-            eff_alpha = base_alpha + (0.38 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.08) ** 1.0)
+            eff_alpha = base_alpha + (0.75 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -475,34 +477,25 @@ class FaceMeshTracker:
                 if results and results.multi_face_landmarks:
                     for fl in results.multi_face_landmarks:
                         landmarks = fl.landmark
-                        # Anatomical facial landmarks for vector pitch projection:
-                        # Eyes: 33 (right eye), 263 (left eye)
+                        # Anatomical facial landmarks with hybrid pitch boost
                         re_pt = landmarks[33]
                         le_pt = landmarks[263]
                         eye_x = 0.5 * (re_pt.x + le_pt.x) * w
                         eye_y = 0.5 * (re_pt.y + le_pt.y) * h
 
-                        # Mouth: 61 (right mouth), 291 (left mouth)
                         rm_pt = landmarks[61]
                         lm_pt = landmarks[291]
-                        mouth_x = 0.5 * (rm_pt.x + lm_pt.x) * w
                         mouth_y = 0.5 * (rm_pt.y + lm_pt.y) * h
 
-                        # Nose tip: 1
                         nose_pt = landmarks[NOSE_TIP_IDX]
                         nose_x = nose_pt.x * w
                         nose_y = nose_pt.y * h
 
-                        vx = mouth_x - eye_x
-                        vy = mouth_y - eye_y
-                        v_sq = vx * vx + vy * vy
-                        ux = nose_x - eye_x
-                        uy = nose_y - eye_y
-
-                        if v_sq > 1e-4:
-                            ry = float(np.clip((ux * vx + uy * vy) / v_sq, 0.10, 0.95))
-                        else:
-                            ry = 0.58
+                        anchor_y = 0.60 * nose_y + 0.40 * eye_y
+                        face_pos_y = anchor_y / float(h)
+                        face_h = max(10.0, mouth_y - eye_y)
+                        pitch_delta = (nose_y - eye_y) / face_h - 0.58
+                        ry = float(np.clip(face_pos_y + 0.45 * pitch_delta, 0.05, 0.95))
 
                         det_fh = abs(landmarks[152].y - landmarks[10].y) * h
                         det_fw = abs(landmarks[454].x - landmarks[234].x) * w
@@ -621,8 +614,8 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Run detection at 240x180 for sharp 2-player recognition (~10ms) on Raspberry Pi 4 CPU
-        net_w, net_h = 240, 180
+        # Run detection at 192x144 for ultra-fast zero-drop recognition (~12ms) on Raspberry Pi 4 CPU
+        net_w, net_h = 192, 144
         detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
         detect_scale_x = w / float(net_w)
         detect_scale_y = h / float(net_h)
@@ -635,7 +628,7 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.25:
+            if score < 0.20:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
@@ -658,27 +651,13 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # True anatomical head pitch via vector dot-product projection:
-            eye_x = 0.5 * (re_x + le_x)
+            # High precision skull anchor with pitch nod amplification
             eye_y = 0.5 * (re_y + le_y)
-            mouth_x = 0.5 * (rm_x + lm_x)
-            mouth_y = 0.5 * (rm_y + lm_y)
-            vx = mouth_x - eye_x
-            vy = mouth_y - eye_y
-            v_sq = vx * vx + vy * vy
-
-            ux = nose_x - eye_x
-            uy = nose_y - eye_y
-
-            if v_sq > 1e-4:
-                # Normalized dot-product projection:
-                # 100% invariant to bodily translation (squatting, crouching, lowering center of gravity)
-                # 100% invariant to distance / scale and head roll
-                # Neutral is ~0.58; Head UP: drops towards ~0.45; Head DOWN: rises towards ~0.75
-                pitch_ratio = float((ux * vx + uy * vy) / v_sq)
-                raw_y = float(np.clip(pitch_ratio, 0.10, 0.95))
-            else:
-                raw_y = 0.58
+            anchor_y = 0.60 * nose_y + 0.40 * eye_y
+            face_pos_y = anchor_y / float(h)
+            face_h = max(10.0, 0.5 * (rm_y + lm_y) - eye_y)
+            pitch_delta = (nose_y - eye_y) / face_h - 0.58
+            raw_y = float(np.clip(face_pos_y + 0.45 * pitch_delta, 0.05, 0.95))
 
             center_x = fx + fw * 0.5
 
