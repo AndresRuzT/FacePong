@@ -72,9 +72,9 @@ FacePong standardizes travel sensitivity across setups:
 
 | Profile | Target Environment | Spread ($\pm$) | Smoothing ($\alpha$) | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **`TV`** | Living room / Kiosks (1.5–3.5 m) | $\pm 0.058$ | `0.26` | Ultra-responsive threshold; gentle, subtle head nods cover the entire court without jerky movements. |
-| **`LAPTOP`** | Desk workstation (~50 cm) | $\pm 0.092$ | `0.24` | Balanced responsive dynamic range for close-range desk usage. |
-| **`TABLET`** | Handheld / Ultra-near (~30–40 cm) | $\pm 0.125$ | `0.20` | Gentle range dampening micro-movements for handheld or tablet mounts. |
+| **`TV`** | Living room / Kiosks (1.5–3.5 m) | $\pm 0.042$ | `0.30` | Ultra-responsive threshold; gentle, subtle head nods cover the entire court without jerky movements. |
+| **`LAPTOP`** | Desk workstation (~50 cm) | $\pm 0.055$ | `0.28` | Balanced responsive dynamic range for close-range desk usage. |
+| **`TABLET`** | Handheld / Ultra-near (~30–40 cm) | $\pm 0.075$ | `0.24` | Gentle range dampening micro-movements for handheld or tablet mounts. |
 | **`AUTO`** | Universal (Default) | Dynamic | Dynamic | Automatically queries display resolution and scales spread inversely with physical face size ($f_h / h$). |
 
 > **Interactive Toggle**: Press **`T`** at any point during execution to cycle profiles on the fly with instantaneous HUD feedback.

@@ -141,31 +141,31 @@ class FaceMeshTracker:
     def get_effective_range_spread(self, face_height_fraction: Optional[float] = None) -> float:
         """
         Calculates optimal head motion spread standardized across device classes:
-          - TV: player is 1.5-3m away on a large display -> ultra-responsive spread (~0.058)
-          - LAPTOP: player is ~50cm away at desk -> balanced natural spread (~0.092)
-          - TABLET: player is ~35cm away, close-up -> gentle spread (~0.125)
+          - TV: player is 1.5-3m away on a large display -> ultra-responsive spread (~0.042)
+          - LAPTOP: player is ~50cm away at desk -> balanced effortless spread (~0.055)
+          - TABLET: player is ~35cm away, close-up -> gentle spread (~0.075)
           - AUTO: detects screen resolution and scales inversely with physical distance (face size)
         """
         if self.device_profile == DeviceProfile.TV:
-            base_spread = 0.058
+            base_spread = 0.042
         elif self.device_profile == DeviceProfile.LAPTOP:
-            base_spread = 0.092
+            base_spread = 0.055
         elif self.device_profile == DeviceProfile.TABLET:
-            base_spread = 0.125
+            base_spread = 0.075
         else:
             # AUTO profile:
             # TVs / large displays are >= 1000px height
             if self._screen_height >= 1000:
-                base_spread = 0.062
+                base_spread = 0.046
             else:
-                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.3))
-                config_spread = getattr(self.config, "default_range_spread", 0.12)
-                base_spread = config_spread / (sensitivity ** 0.6)
+                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 3.0))
+                config_spread = getattr(self.config, "default_range_spread", 0.080)
+                base_spread = config_spread / (sensitivity ** 0.5)
 
         # Distance normalization: face size is inversely proportional to player distance
         if face_height_fraction is not None and face_height_fraction > 0.04:
-            ref_scale = 0.22  # reference face height fraction
-            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.50, 1.40))
+            ref_scale = 0.20  # reference face height fraction
+            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.75, 1.25))
             return float(base_spread * dist_multiplier)
 
         return float(base_spread)
@@ -173,12 +173,12 @@ class FaceMeshTracker:
     def get_effective_ema_alpha(self) -> float:
         """Returns baseline EMA smoothing factor tuned for device ergonomics."""
         if self.device_profile == DeviceProfile.TV:
-            return 0.26
+            return 0.30
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.24
+            return 0.28
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.20
-        return getattr(self.config, "ema_alpha", 0.24)
+            return 0.24
+        return getattr(self.config, "ema_alpha", 0.28)
 
     def cycle_device_profile(self) -> DeviceProfile:
         """Cycles between AUTO -> TV -> LAPTOP -> TABLET -> AUTO."""
@@ -205,12 +205,12 @@ class FaceMeshTracker:
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(160, 120),
-                    score_threshold=0.45,
+                    input_size=(240, 180),
+                    score_threshold=0.25,
                     nms_threshold=0.3,
-                    top_k=6,
+                    top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (160x120, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized (240x180, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -313,18 +313,18 @@ class FaceMeshTracker:
             # Stationary noise gate: cancels camera sensor micro-quantization when head is stationary
             if not is_first and last_raw > 0:
                 diff_raw = abs(raw_y - last_raw)
-                if diff_raw < 0.0055:
+                if diff_raw < 0.0035:
                     raw_y = last_raw
-                elif diff_raw < 0.016:
+                elif diff_raw < 0.010:
                     # Smooth cubic hermite blend from deadband to active motion (zero abrupt threshold step)
-                    t = (diff_raw - 0.0055) / (0.016 - 0.0055)
+                    t = (diff_raw - 0.0035) / (0.010 - 0.0035)
                     blend = t * t * (3.0 - 2.0 * t)
                     raw_y = last_raw + (raw_y - last_raw) * blend
 
-            # Downward slew-rate limiter: prevents any extreme single-frame artifact (> 0.24 in < 40ms)
+            # Downward slew-rate limiter: prevents any extreme single-frame artifact (> 0.25 in < 40ms)
             # while preserving snappy, legitimate human head flicks and fast downward nods
             if not is_first and last_raw > 0:
-                max_step_down = max(0.24, 8.5 * dt_s)
+                max_step_down = max(0.25, 9.0 * dt_s)
                 if (raw_y - last_raw) > max_step_down:
                     raw_y = last_raw + max_step_down
 
@@ -345,7 +345,7 @@ class FaceMeshTracker:
         if self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
             target_spread = self.get_effective_range_spread(face_height / float(frame_height))
             curr_spread = 0.5 * (max_b - min_b)
-            if abs(target_spread - curr_spread) > 0.012:
+            if abs(target_spread - curr_spread) > 0.010:
                 new_spread = 0.95 * curr_spread + 0.05 * target_spread
                 mid_y = 0.5 * (min_b + max_b)
                 min_b = max(0.02, mid_y - new_spread)
@@ -378,14 +378,13 @@ class FaceMeshTracker:
         # Asymmetric spans ensure looking up is smooth and controlled, while looking down reaches
         # the bottom of the arena with a natural, subtle downward nod without straining the neck.
         if raw_y <= mid_b:
-            # Looking UP: balanced span (1.10x) for natural, smooth aesthetic tracking
-            half_span_up = max(0.01, (mid_b - min_b) * 1.10)
+            # Looking UP: effortless responsive span (1.05x)
+            half_span_up = max(0.01, (mid_b - min_b) * 1.05)
             norm = min(1.0, max(0.0, (mid_b - raw_y) / half_span_up))
             linear_y = 0.5 - 0.5 * norm
         else:
-            # Looking DOWN: slightly expanded from 0.68x to 0.72x to keep downward reach effortless
-            # while avoiding excessive sensitivity or jitter
-            half_span_down = max(0.01, (max_b - mid_b) * 0.72)
+            # Looking DOWN: responsive span (0.75x) for easy, subtle downward nods
+            half_span_down = max(0.01, (max_b - mid_b) * 0.75)
             norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
             linear_y = 0.5 + 0.5 * norm
 
@@ -393,19 +392,19 @@ class FaceMeshTracker:
         u = 2.0 * (linear_y - 0.5)
         abs_u = abs(u)
         sign_u = 1.0 if u >= 0 else -1.0
-        curved_u = sign_u * (0.80 * abs_u + 0.20 * (abs_u ** 1.25))
+        curved_u = sign_u * (0.85 * abs_u + 0.15 * (abs_u ** 1.2))
         mapped_y = float(np.clip(0.5 + 0.5 * curved_u, 0.0, 1.0))
 
-        # Dual-regime adaptive EMA smoothing:
-        # Stationary / micro-nods: low base alpha for silky calm and zero jitter
-        # Abrupt / fast flicks: high alpha (up to 0.92) for immediate, crisp response with zero lag
+        # Continuous adaptive EMA smoothing:
+        # Stationary / micro-nods: low base alpha for calm stability (zero jitter)
+        # Active flicks: dynamic alpha (up to 0.60) for continuous, silky response (zero jumping)
         base_alpha = self.get_effective_ema_alpha()
         if is_first:
             smoothed = mapped_y
         else:
             diff = abs(mapped_y - smoothed)
-            alpha_boost = min(1.0, (diff / 0.08) ** 1.25)
-            eff_alpha = base_alpha + (0.92 - base_alpha) * alpha_boost
+            alpha_boost = min(1.0, (diff / 0.09) ** 1.1)
+            eff_alpha = base_alpha + (0.60 - base_alpha) * alpha_boost
             smoothed = (eff_alpha * mapped_y) + ((1.0 - eff_alpha) * smoothed)
 
         # Save back into state
@@ -501,48 +500,44 @@ class FaceMeshTracker:
         # Filter out tiny noise (faces < 14px)
         faces = [f for f in faces if f.get("fh", 20) >= 14 and f.get("fw", 20) >= 14]
 
-        # Robust independent spatial binning: Left (P1) vs Right (P2)
-        # Guarantees Player 2's paddle updates at full FPS without interference or lag from Player 1
+        # Horizontal ordering: Leftmost is Player 1, Rightmost is Player 2
+        # Avoids rigid mid_x cutoffs that fail if players stand slightly off-center
         mid_x = w * 0.5
-        p1_candidates = [f for f in faces if f["center_x"] < mid_x]
-        p2_candidates = [f for f in faces if f["center_x"] >= mid_x]
+        faces.sort(key=lambda f: f["center_x"])
 
-        if self.is_pvp:
-            # In 2-Player mode: STRICT spatial segregation.
-            # Player 1 is exclusively from the left half; Player 2 exclusively from the right half.
-            # A momentary drop or upward head tilt NEVER cross-contaminates or assigns P2's face to P1!
-            p1_face = p1_candidates[0] if p1_candidates else None
-            p2_face = p2_candidates[0] if p2_candidates else None
-            active_count = (1 if p1_face is not None else 0) + (1 if p2_face is not None else 0)
-            self.face_count = active_count
-        else:
-            # In Solo / Attract mode:
-            if p1_candidates and p2_candidates:
-                p1_face = p1_candidates[0]
-                p2_face = p2_candidates[0]
-                self.face_count = 2
-                self.is_pvp = True
-            elif len(faces) == 1:
-                # Solo player anywhere in frame
-                p1_face = faces[0]
-                p2_face = None
-                self.face_count = 1
-                self.is_pvp = False
-            elif len(faces) >= 2:
-                # Multiple candidates on one side (e.g. spectator or false positive)
-                # Pick the one closest to previous tracked position if known, else largest
-                if self._p1_last_valid_raw_y > 0:
-                    p1_face = min(faces, key=lambda f: abs(f["raw_y"] - self._p1_last_valid_raw_y))
-                else:
-                    p1_face = max(faces, key=lambda f: f["fw"] * f["fh"])
-                p2_face = None
-                self.face_count = 1
-                self.is_pvp = False
+        if len(faces) >= 2:
+            # 2 or more faces: leftmost is P1, rightmost is P2 (as long as separated by >= 10% width)
+            p1_cand = faces[0]
+            p2_cand = faces[-1]
+            if (p2_cand["center_x"] - p1_cand["center_x"]) >= (0.10 * w):
+                p1_face = p1_cand
+                p2_face = p2_cand
             else:
-                p1_face = None
+                # Too close horizontally (single player with duplicate detection): keep largest
+                p1_face = max(faces, key=lambda f: f["fw"] * f["fh"])
                 p2_face = None
-                self.face_count = 0
-                self.is_pvp = False
+        elif len(faces) == 1:
+            cand = faces[0]
+            if self.is_pvp:
+                # In 2-Player mode, determine whether this single face is P1 or P2 based on position
+                # If closer to left half (< 0.5 * w), it's P1; otherwise P2
+                if cand["center_x"] < mid_x:
+                    p1_face = cand
+                    p2_face = None
+                else:
+                    p1_face = None
+                    p2_face = cand
+            else:
+                p1_face = cand
+                p2_face = None
+        else:
+            p1_face = None
+            p2_face = None
+
+        active_count = (1 if p1_face is not None else 0) + (1 if p2_face is not None else 0)
+        self.face_count = active_count
+        if not self.is_pvp and active_count >= 2:
+            self.is_pvp = True
 
         # Update Player 1 state
         if p1_face is not None:
@@ -583,8 +578,8 @@ class FaceMeshTracker:
         Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Run detection at 160x120 for optimal frame rate (~3-5ms) on Raspberry Pi 4 CPU
-        net_w, net_h = 160, 120
+        # Run detection at 240x180 for sharp 2-player recognition (~10ms) on Raspberry Pi 4 CPU
+        net_w, net_h = 240, 180
         detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
         detect_scale_x = w / float(net_w)
         detect_scale_y = h / float(net_h)
@@ -597,15 +592,15 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.45:
+            if score < 0.25:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
             fw = float(face[2] * detect_scale_x)
             fh = float(face[3] * detect_scale_y)
 
-            # Minimum size threshold: face must be at least 14px in original frame space
-            if fh < 14 or fw < 14:
+            # Minimum size threshold: face must be at least 10px in scan space
+            if fh < 10 or fw < 10:
                 continue
 
             # Key landmarks

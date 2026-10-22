@@ -92,8 +92,8 @@ class Paddle:
         self.current_velocity = (self.current_velocity - omega * temp) * exp
         new_pos = temp_target + (change + temp) * exp
 
-        # Prevent overshooting target and snap micro-jitter settling (< 0.75 px)
-        if (self.target_y - self.y > 0.0) == (new_pos > self.target_y) or abs(new_pos - self.target_y) < 0.75:
+        # Prevent overshooting target
+        if (self.target_y - self.y > 0.0) == (new_pos > self.target_y):
             new_pos = self.target_y
             self.current_velocity = 0.0
 
