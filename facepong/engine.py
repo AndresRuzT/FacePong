@@ -1,10 +1,13 @@
 """Main game engine coordinating the vision pipeline, game loop, and exhibition states."""
 
+from __future__ import annotations
+
 import logging
 import math
 import random
 import sys
 import time
+from typing import Optional, Tuple
 import pygame
 
 from facepong.config import GameConfig
