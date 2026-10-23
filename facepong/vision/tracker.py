@@ -179,6 +179,14 @@ class FaceMeshTracker:
         self._velocity_y: float = 0.0
         self._last_raw_y_sample_time: float = 0.0
 
+        # Sub-Pixel Lucas-Kanade Optical Flow (KLT) tracking state
+        self._p1_klt_pts: Optional[np.ndarray] = None
+        self._p1_prev_gray: Optional[np.ndarray] = None
+        self._p1_klt_y: Optional[float] = None
+        self._p2_klt_pts: Optional[np.ndarray] = None
+        self._p2_prev_gray: Optional[np.ndarray] = None
+        self._p2_klt_y: Optional[float] = None
+
         # Haar Cascade bounding box smoothing and ROI tracking state
         self._cascade_box: Optional[Tuple[float, float, float, float]] = None
         self._cascade_miss_count: int = 0
@@ -349,6 +357,12 @@ class FaceMeshTracker:
         self._clamped_at_max_count = 0
         self._p1_tracked_x = None
         self._p2_tracked_x = None
+        self._p1_klt_pts = None
+        self._p1_prev_gray = None
+        self._p1_klt_y = None
+        self._p2_klt_pts = None
+        self._p2_prev_gray = None
+        self._p2_klt_y = None
         self._p1_filter.reset()
         self._p2_filter.reset()
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
@@ -367,6 +381,7 @@ class FaceMeshTracker:
             self._is_first_sample = False
             self._p1_last_valid_raw_y = neutral_y
             self._last_valid_raw_y = neutral_y
+            self._p1_klt_y = neutral_y
             self._p1_filter.reset(0.5)
             logger.info(
                 "Calibrated P1 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
@@ -377,6 +392,7 @@ class FaceMeshTracker:
             self._p2_max_y_bound = max_b
             self._p2_is_first_sample = False
             self._p2_last_valid_raw_y = neutral_y
+            self._p2_klt_y = neutral_y
             self._p2_filter.reset(0.5)
             logger.info(
                 "Calibrated P2 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
@@ -513,6 +529,73 @@ class FaceMeshTracker:
 
         return smoothed
 
+    def _apply_klt_optical_flow(
+        self, gray: np.ndarray, face: Optional[dict], h: int, w: int, player_idx: int = 1
+    ) -> Tuple[float, Optional[np.ndarray]]:
+        """
+        Sub-pixel Lucas-Kanade Optical Flow (KLT) tracker with complementary neural anchoring.
+        Measures exact physical head displacement with sub-pixel precision, eliminating discrete quantization steps.
+        """
+        pts_attr = "_p1_klt_pts" if player_idx == 1 else "_p2_klt_pts"
+        prev_attr = "_p1_prev_gray" if player_idx == 1 else "_p2_prev_gray"
+        klt_y_attr = "_p1_klt_y" if player_idx == 1 else "_p2_klt_y"
+
+        old_pts = getattr(self, pts_attr)
+        prev_gray = getattr(self, prev_attr)
+        last_klt_y = getattr(self, klt_y_attr)
+
+        det_anchor_y = face["raw_y"] if face is not None else None
+        tracked_pts = None
+
+        if prev_gray is not None and old_pts is not None and len(old_pts) >= 4:
+            new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+                prev_gray, gray, old_pts, None, winSize=(15, 15), maxLevel=2
+            )
+            valid = (status.ravel() == 1)
+            if np.sum(valid) >= 4:
+                valid_old = old_pts[valid, 0]
+                valid_new = new_pts[valid, 0]
+                dy = float(np.median(valid_new[:, 1] - valid_old[:, 1]))
+                norm_dy = dy / float(h)
+
+                tracked_pts = valid_new.reshape(-1, 1, 2)
+
+                if last_klt_y is None:
+                    last_klt_y = det_anchor_y if det_anchor_y is not None else 0.5
+
+                flow_y = last_klt_y + norm_dy
+
+                if det_anchor_y is not None:
+                    # Complementary fusion: 82% sub-pixel optical flow + 18% absolute neural anchor
+                    fused_y = 0.82 * flow_y + 0.18 * det_anchor_y
+                else:
+                    fused_y = flow_y
+
+                setattr(self, klt_y_attr, fused_y)
+                setattr(self, pts_attr, tracked_pts)
+                setattr(self, prev_attr, gray.copy())
+                return fused_y, tracked_pts
+
+        # Re-seed feature points on face bounding box
+        if det_anchor_y is not None:
+            setattr(self, klt_y_attr, det_anchor_y)
+            fx, fy, fw, fh = face["fx"], face["fy"], face["fw"], face["fh"]
+            mask = np.zeros_like(gray)
+            y1 = max(0, int(fy + 0.10 * fh))
+            y2 = min(h, int(fy + 0.85 * fh))
+            x1 = max(0, int(fx + 0.10 * fw))
+            x2 = min(w, int(fx + 0.90 * fw))
+            mask[y1:y2, x1:x2] = 255
+            new_features = cv2.goodFeaturesToTrack(
+                gray, maxCorners=25, qualityLevel=0.015, minDistance=5, mask=mask
+            )
+            setattr(self, pts_attr, new_features)
+            setattr(self, prev_attr, gray.copy())
+            return det_anchor_y, new_features
+
+        setattr(self, prev_attr, gray.copy())
+        return (last_klt_y if last_klt_y is not None else 0.5), None
+
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
         """
         Executes face detection supporting 1 or 2 players simultaneously.
@@ -525,6 +608,7 @@ class FaceMeshTracker:
             frame = cv2.flip(frame, 1)
 
         h, w, _ = frame.shape
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         now = time.perf_counter()
 
         faces: List[dict] = []
@@ -637,27 +721,40 @@ class FaceMeshTracker:
         if p1_face is not None:
             effective_p1_detected = True
             self.p1_detected = True
-            self.p1_raw_y = p1_face["raw_y"]
-            self.p1_smoothed_y = self._update_player_state(p1_face["raw_y"], p1_face["fh"], h, now, player_idx=1)
+            raw_y_p1, klt_pts1 = self._apply_klt_optical_flow(gray_frame, p1_face, h, w, player_idx=1)
+            p1_face["klt_points"] = klt_pts1
+            self.p1_raw_y = raw_y_p1
+            self.p1_smoothed_y = self._update_player_state(raw_y_p1, p1_face["fh"], h, now, player_idx=1)
         else:
             if (now - self._p1_last_valid_detection_time) < 0.4 and not self._p1_is_first_sample:
                 effective_p1_detected = True
                 self.p1_detected = True
+                raw_y_p1, klt_pts1 = self._apply_klt_optical_flow(gray_frame, None, h, w, player_idx=1)
+                self.p1_raw_y = raw_y_p1
+                self.p1_smoothed_y = self._update_player_state(raw_y_p1, 60.0, h, now, player_idx=1)
             else:
                 effective_p1_detected = False
                 self.p1_detected = False
+                self._p1_klt_pts = None
+                self._p1_prev_gray = None
 
         # Update Player 2 state
         if p2_face is not None:
-            raw_y_p2 = p2_face["raw_y"]
+            raw_y_p2, klt_pts2 = self._apply_klt_optical_flow(gray_frame, p2_face, h, w, player_idx=2)
+            p2_face["klt_points"] = klt_pts2
             self.p2_detected = True
             self.p2_raw_y = raw_y_p2
             self.p2_smoothed_y = self._update_player_state(raw_y_p2, p2_face["fh"], h, now, player_idx=2)
         else:
             if (now - self._p2_last_valid_detection_time) < 0.4 and not self._p2_is_first_sample:
                 self.p2_detected = True
+                raw_y_p2, klt_pts2 = self._apply_klt_optical_flow(gray_frame, None, h, w, player_idx=2)
+                self.p2_raw_y = raw_y_p2
+                self.p2_smoothed_y = self._update_player_state(raw_y_p2, 60.0, h, now, player_idx=2)
             else:
                 self.p2_detected = False
+                self._p2_klt_pts = None
+                self._p2_prev_gray = None
 
         if self._recenter_needed:
             self._recenter_needed = False
@@ -669,16 +766,20 @@ class FaceMeshTracker:
 
     def _yunet_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
         """
-        Detects multiple faces using OpenCV YuNet DNN with downscaled single-pass scan.
+        Detects multiple faces using OpenCV YuNet DNN with native resolution scan.
         Optimized for 60 FPS edge computing on Raspberry Pi 4.
         """
-        # Edge-optimized scan size (192x144) guarantees steady 30-40+ FPS inference on Raspberry Pi 4 CPU
-        net_w, net_h = 192, 144
-        detect_frame = cv2.resize(frame, (net_w, net_h), interpolation=cv2.INTER_LINEAR)
-        detect_scale_x = w / float(net_w)
-        detect_scale_y = h / float(net_h)
+        detect_w, detect_h = min(320, w), min(240, h)
+        if w != detect_w or h != detect_h:
+            detect_frame = cv2.resize(frame, (detect_w, detect_h), interpolation=cv2.INTER_LINEAR)
+            detect_scale_x = w / float(detect_w)
+            detect_scale_y = h / float(detect_h)
+        else:
+            detect_frame = frame
+            detect_scale_x = 1.0
+            detect_scale_y = 1.0
 
-        self._yunet.setInputSize((net_w, net_h))
+        self._yunet.setInputSize((detect_w, detect_h))
         _, faces = self._yunet.detect(detect_frame)
         if faces is None or len(faces) == 0:
             return []
@@ -842,7 +943,7 @@ class FaceMeshTracker:
             ny = int(p1_face.get("nose_y", fy + fh * 0.5) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (0, 255, 200), -1)
 
-            # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
+            # 1. MediaPipe 468-point cyber mesh if available
             if "landmarks" in p1_face:
                 pts = p1_face["landmarks"]
                 # 1. Face oval contour polyline
@@ -867,6 +968,41 @@ class FaceMeshTracker:
                     py = int(pts[f_idx].y * preview_h)
                     cv2.circle(hud_frame, (px, py), 2, (0, 255, 230), -1)
 
+            # 2. YuNet 5-point facial geometry wireframe (Primary on Raspberry Pi / Python 3.13)
+            elif "re_x" in p1_face:
+                rex, rey = int(p1_face["re_x"] * scale_x), int(p1_face["re_y"] * scale_y)
+                lex, ley = int(p1_face["le_x"] * scale_x), int(p1_face["le_y"] * scale_y)
+                nx, ny = int(p1_face["nose_x"] * scale_x), int(p1_face["nose_y"] * scale_y)
+                rmx, rmy = int(p1_face["rm_x"] * scale_x), int(p1_face["rm_y"] * scale_y)
+                lmx, lmy = int(p1_face["lm_x"] * scale_x), int(p1_face["lm_y"] * scale_y)
+
+                # Eye bridge & eyebrow arches
+                cv2.line(hud_frame, (rex, rey), (lex, ley), (0, 200, 220), 1)
+                cv2.line(hud_frame, (rex - 4, rey - 3), (rex + 6, rey - 5), (0, 240, 255), 1)
+                cv2.line(hud_frame, (lex - 6, ley - 5), (lex + 4, ley - 3), (0, 240, 255), 1)
+
+                # Nose bridge from eyes center to nose tip
+                mid_x, mid_y = (rex + lex) // 2, (rey + ley) // 2
+                cv2.line(hud_frame, (mid_x, mid_y), (nx, ny), (0, 255, 200), 1)
+
+                # Mouth line & jaw contour
+                cv2.line(hud_frame, (rmx, rmy), (lmx, lmy), (0, 200, 220), 1)
+                chin_x = nx
+                chin_y = int(ry2 - 4)
+                cv2.line(hud_frame, (rmx, rmy), (chin_x, chin_y), (0, 180, 200), 1)
+                cv2.line(hud_frame, (lmx, lmy), (chin_x, chin_y), (0, 180, 200), 1)
+
+                # Biometric tracking nodes
+                for p_pt in ((rex, rey), (lex, ley), (nx, ny), (rmx, rmy), (lmx, lmy), (mid_x, mid_y), (chin_x, chin_y)):
+                    cv2.circle(hud_frame, p_pt, 2, (0, 255, 230), -1)
+
+            # 3. Dynamic KLT optical flow sub-pixel tracking constellation
+            if p1_face.get("klt_points") is not None:
+                for kpt in p1_face["klt_points"]:
+                    kpx = int(kpt[0, 0] * scale_x)
+                    kpy = int(kpt[0, 1] * scale_y)
+                    cv2.circle(hud_frame, (kpx, kpy), 1, (0, 255, 180), -1)
+
         # Render Player 2 (Crimson/Red)
         if p2_face is not None:
             fx, fy, fw, fh = p2_face["fx"], p2_face["fy"], p2_face["fw"], p2_face["fh"]
@@ -881,7 +1017,7 @@ class FaceMeshTracker:
             ny = int(p2_face.get("nose_y", fy + fh * 0.5) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (255, 60, 90), -1)
 
-            # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
+            # 1. MediaPipe 468-point cyber mesh if available
             if "landmarks" in p2_face:
                 pts = p2_face["landmarks"]
                 # 1. Face oval contour polyline
@@ -905,6 +1041,41 @@ class FaceMeshTracker:
                     px = int(pts[f_idx].x * preview_w)
                     py = int(pts[f_idx].y * preview_h)
                     cv2.circle(hud_frame, (px, py), 2, (255, 140, 180), -1)
+
+            # 2. YuNet 5-point facial geometry wireframe (Primary on Raspberry Pi / Python 3.13)
+            elif "re_x" in p2_face:
+                rex, rey = int(p2_face["re_x"] * scale_x), int(p2_face["re_y"] * scale_y)
+                lex, ley = int(p2_face["le_x"] * scale_x), int(p2_face["le_y"] * scale_y)
+                nx, ny = int(p2_face["nose_x"] * scale_x), int(p2_face["nose_y"] * scale_y)
+                rmx, rmy = int(p2_face["rm_x"] * scale_x), int(p2_face["rm_y"] * scale_y)
+                lmx, lmy = int(p2_face["lm_x"] * scale_x), int(p2_face["lm_y"] * scale_y)
+
+                # Eye bridge & eyebrow arches
+                cv2.line(hud_frame, (rex, rey), (lex, ley), (220, 50, 80), 1)
+                cv2.line(hud_frame, (rex - 4, rey - 3), (rex + 6, rey - 5), (255, 80, 120), 1)
+                cv2.line(hud_frame, (lex - 6, ley - 5), (lex + 4, ley - 3), (255, 80, 120), 1)
+
+                # Nose bridge from eyes center to nose tip
+                mid_x, mid_y = (rex + lex) // 2, (rey + ley) // 2
+                cv2.line(hud_frame, (mid_x, mid_y), (nx, ny), (255, 100, 130), 1)
+
+                # Mouth line & jaw contour
+                cv2.line(hud_frame, (rmx, rmy), (lmx, lmy), (220, 50, 80), 1)
+                chin_x = nx
+                chin_y = int(ry2 - 4)
+                cv2.line(hud_frame, (rmx, rmy), (chin_x, chin_y), (180, 40, 60), 1)
+                cv2.line(hud_frame, (lmx, lmy), (chin_x, chin_y), (180, 40, 60), 1)
+
+                # Biometric tracking nodes
+                for p_pt in ((rex, rey), (lex, ley), (nx, ny), (rmx, rmy), (lmx, lmy), (mid_x, mid_y), (chin_x, chin_y)):
+                    cv2.circle(hud_frame, p_pt, 2, (255, 140, 180), -1)
+
+            # 3. Dynamic KLT optical flow sub-pixel tracking constellation
+            if p2_face.get("klt_points") is not None:
+                for kpt in p2_face["klt_points"]:
+                    kpx = int(kpt[0, 0] * scale_x)
+                    kpy = int(kpt[0, 1] * scale_y)
+                    cv2.circle(hud_frame, (kpx, kpy), 1, (255, 120, 160), -1)
 
         # Status text at bottom of PIP
         if self.is_pvp:
