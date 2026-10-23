@@ -208,6 +208,10 @@ class FaceMeshTracker:
         # YuNet ROI tracking state (2-phase detection: ROI fast path + full scan fallback)
         self._yunet_last_box: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h) in detect-space
         self._yunet_roi_miss: int = 0
+        self._p1_last_box: Optional[Tuple[float, float, float, float]] = None
+        self._p1_roi_miss: int = 0
+        self._p2_last_box: Optional[Tuple[float, float, float, float]] = None
+        self._p2_roi_miss: int = 0
         self._yunet_current_size: Tuple[int, int] = (320, 240)
 
         # Device profile & screen adaptive sensitivity
@@ -358,6 +362,8 @@ class FaceMeshTracker:
         if not is_pvp:
             self.p2_detected = False
             self._p2_tracked_x = None
+            self._p2_last_box = None
+            self._p2_roi_miss = 0
 
     def reset_for_new_camera(self) -> None:
         """Flags that a camera switch occurred and baseline must re-anchor to new camera frame."""
@@ -366,6 +372,10 @@ class FaceMeshTracker:
         self._is_calibrated = False
         self._yunet_last_box = None
         self._yunet_roi_miss = 0
+        self._p1_last_box = None
+        self._p1_roi_miss = 0
+        self._p2_last_box = None
+        self._p2_roi_miss = 0
         self._clamped_at_min_count = 0
         self._clamped_at_max_count = 0
         self._p1_tracked_x = None
@@ -470,7 +480,7 @@ class FaceMeshTracker:
 
         # Continuous soft-knee noise gate: suppresses resting sensor micro-tremor without staircase quantization
         # Smooth quadratic attenuation eliminates jumps and keeps 100% continuous fluid tracking
-        noise_threshold = 0.0022
+        noise_threshold = 0.0010
         last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
         if is_first:
             if player_idx == 1:
@@ -660,10 +670,58 @@ class FaceMeshTracker:
 
         faces: List[dict] = []
 
-        # ─── 1. OpenCV YuNet DNN Engine (Native 320x240, 22ms on Pi 4, 95%+ detection rate at distance) ───
+        # ─── 1. OpenCV YuNet DNN Engine (2-Phase Fast ROI + Full Scan Fallback) ───
         if self._yunet is not None:
             try:
-                faces = self._yunet_detect_multi(frame, w, h)
+                faces = []
+                p1_roi = None
+                p2_roi = None
+
+                # Phase 1: Fast ROI path for active tracked players (~3-5ms path on Pi 4)
+                if self._p1_last_box is not None and self._p1_roi_miss < 3:
+                    p1_roi = self._detect_yunet_roi(frame, w, h, self._p1_last_box)
+                    if p1_roi:
+                        self._p1_roi_miss = 0
+                        self._p1_last_box = (p1_roi[0]["fx"], p1_roi[0]["fy"], p1_roi[0]["fw"], p1_roi[0]["fh"])
+                        faces.extend(p1_roi)
+                    else:
+                        self._p1_roi_miss += 1
+
+                if self.is_pvp and self._p2_last_box is not None and self._p2_roi_miss < 3:
+                    p2_roi = self._detect_yunet_roi(frame, w, h, self._p2_last_box)
+                    if p2_roi:
+                        self._p2_roi_miss = 0
+                        self._p2_last_box = (p2_roi[0]["fx"], p2_roi[0]["fy"], p2_roi[0]["fw"], p2_roi[0]["fh"])
+                        faces.extend(p2_roi)
+                    else:
+                        self._p2_roi_miss += 1
+
+                # Phase 2: Full Scan Fallback (runs on first frame, face loss, or periodic discovery)
+                needs_full_scan = False
+                if not faces:
+                    needs_full_scan = True
+                elif self._p1_last_box is None or self._p1_roi_miss >= 3:
+                    needs_full_scan = True
+                elif self.is_pvp and (self._p2_last_box is None or self._p2_roi_miss >= 3):
+                    needs_full_scan = True
+
+                if needs_full_scan:
+                    full_faces = self._yunet_detect_multi(frame, w, h)
+                    faces = full_faces
+                    if faces:
+                        sorted_f = sorted(faces, key=lambda f: f["fw"] * f["fh"], reverse=True)
+                        if len(sorted_f) >= 2 and self.is_pvp:
+                            p1_c, p2_c = (sorted_f[0], sorted_f[1]) if sorted_f[0]["center_x"] < sorted_f[1]["center_x"] else (sorted_f[1], sorted_f[0])
+                            self._p1_last_box = (p1_c["fx"], p1_c["fy"], p1_c["fw"], p1_c["fh"])
+                            self._p1_roi_miss = 0
+                            self._p2_last_box = (p2_c["fx"], p2_c["fy"], p2_c["fw"], p2_c["fh"])
+                            self._p2_roi_miss = 0
+                        elif len(sorted_f) >= 1:
+                            best = sorted_f[0]
+                            self._p1_last_box = (best["fx"], best["fy"], best["fw"], best["fh"])
+                            self._p1_roi_miss = 0
+                            if not self.is_pvp:
+                                self._p2_last_box = None
             except Exception as exc:
                 logger.debug("YuNet detect exception: %s", exc)
 
@@ -747,6 +805,10 @@ class FaceMeshTracker:
             raw_y_p1 = p1_face["raw_y"]
             self.p1_raw_y = raw_y_p1
             self.p1_smoothed_y = self._update_player_state(raw_y_p1, p1_face["fh"], h, now, player_idx=1)
+            self._p1_last_box = (p1_face["fx"], p1_face["fy"], p1_face["fw"], p1_face["fh"])
+            self._p1_roi_miss = 0
+            self._yunet_last_box = (int(p1_face["fx"]), int(p1_face["fy"]), int(p1_face["fw"]), int(p1_face["fh"]))
+            self._yunet_roi_miss = 0
         else:
             if (now - self._p1_last_valid_detection_time) < 0.60 and not self._p1_is_first_sample:
                 effective_p1_detected = True
@@ -764,6 +826,8 @@ class FaceMeshTracker:
             self.p2_detected = True
             self.p2_raw_y = raw_y_p2
             self.p2_smoothed_y = self._update_player_state(raw_y_p2, p2_face["fh"], h, now, player_idx=2)
+            self._p2_last_box = (p2_face["fx"], p2_face["fy"], p2_face["fw"], p2_face["fh"])
+            self._p2_roi_miss = 0
         else:
             if (now - self._p2_last_valid_detection_time) < 0.60 and not self._p2_is_first_sample:
                 self.p2_detected = True

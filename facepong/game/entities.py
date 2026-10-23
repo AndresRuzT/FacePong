@@ -70,6 +70,7 @@ class Paddle:
         self.target_velocity = norm_velocity * range_span
         now = sample_time if sample_time > 0.0 else time.perf_counter()
         self.target_sample_time = now
+        self.clamp_target()
 
         if not self._target_history or now > self._target_history[-1][0]:
             self._target_history.append((now, float(screen_target)))
@@ -101,7 +102,7 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.032,
+        smooth_time: float = 0.040,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
@@ -112,21 +113,10 @@ class Paddle:
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
-        now = current_time if current_time is not None else time.perf_counter()
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
-
-        # Real-time forward extrapolation for the in-between render frame (bridges 30 FPS camera to 60 FPS render)
-        # Continuous smooth blend at low velocities eliminates threshold stepping and jitter
-        if self.target_sample_time > 0.0:
-            extrap_dt = min(0.033, max(0.0, now - self.target_sample_time))
-            v_blend = min(1.0, abs(self.target_velocity) / 40.0)
-            live_target = self.target_y + (self.target_velocity * extrap_dt * v_blend)
-        else:
-            live_target = self.target_y
-
-        effective_target = max(min_center, min(max_center, live_target))
+        effective_target = max(min_center, min(max_center, self.target_y))
 
         st = max(0.0001, smooth_time)
         omega = 2.0 / st
@@ -142,8 +132,8 @@ class Paddle:
         self.current_velocity = (self.current_velocity - omega * temp) * exp
         new_pos = temp_target + (change + temp) * exp
 
-        # Settle gently when within sub-pixel
-        if abs(new_pos - effective_target) < 0.20 and abs(self.current_velocity) < 6.0:
+        # Snap cleanly when crossing target to eliminate asymptotic lag and sliding
+        if (effective_target - self.y > 0.0) == (new_pos > effective_target):
             new_pos = effective_target
             self.current_velocity = 0.0
 
