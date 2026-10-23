@@ -278,8 +278,21 @@ class FaceMeshTracker:
         return self.device_profile
 
     def _init_detector(self) -> None:
-        """Initializes OpenCV YuNet DNN as primary detector (edge-optimized for Raspberry Pi 4)."""
-        # 1. OpenCV YuNet Deep Neural Network Face & Landmark Detector (Fast, lightweight edge architecture)
+        """Initializes face tracking backends with MediaPipe Face Mesh as primary, YuNet as secondary edge fallback."""
+        # 1. MediaPipe Solutions FaceMesh (Primary: dense 468 3D landmarks, sub-pixel optical flow regression)
+        try:
+            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                    max_num_faces=2,
+                    refine_landmarks=False,
+                    min_detection_confidence=0.35,
+                    min_tracking_confidence=0.35,
+                )
+                logger.info("MediaPipe Face Mesh tracker initialized as primary detector (max_faces=2, 468 landmarks)")
+        except Exception as exc:
+            logger.warning("MediaPipe Face Mesh initialization failed: %s", exc)
+
+        # 2. OpenCV YuNet Deep Neural Network Face & Landmark Detector (High-speed edge fallback)
         try:
             # Use 2 threads so 2 CPU cores remain completely dedicated to 60 FPS Pygame render loop on Raspberry Pi
             cv2.setNumThreads(2)
@@ -294,24 +307,9 @@ class FaceMeshTracker:
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized (192x144, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized as fallback (192x144, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
-
-        # 2. MediaPipe Solutions FaceMesh (fallback ONLY if YuNet is unavailable)
-        if self._yunet is None:
-            try:
-                if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                    self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                        max_num_faces=2,
-                        refine_landmarks=False,
-                        min_detection_confidence=0.35,
-                        min_tracking_confidence=0.35,
-                    )
-                    logger.info("MediaPipe Face Mesh tracker initialized as fallback (max=2)")
-            except Exception as exc:
-                logger.debug("MediaPipe Solutions initialization failed (%s).", exc)
-
 
         # 3. OpenCV Haar Cascade as emergency fallback
         try:
@@ -543,15 +541,8 @@ class FaceMeshTracker:
 
         faces: List[dict] = []
 
-        # ─── 1. OpenCV YuNet DNN (Ultra-fast, zero-drop single-pass multi-face detector) ───
-        if self._yunet is not None:
-            try:
-                faces = self._yunet_detect_multi(frame, w, h)
-            except Exception as exc:
-                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
-
-        # ─── 2. MediaPipe Face Mesh fallback (Runs ONLY if YuNet is absent) ───
-        elif self._face_mesh is not None:
+        # ─── 1. MediaPipe Face Mesh (Primary: dense 468 3D landmarks, sub-pixel optical flow) ───
+        if self._face_mesh is not None:
             try:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb_frame.flags.writeable = False
@@ -560,10 +551,10 @@ class FaceMeshTracker:
                 if results and results.multi_face_landmarks:
                     for fl in results.multi_face_landmarks:
                         landmarks = fl.landmark
-                        # Anatomical facial landmarks: nose tip + glabella
+                        # Anatomical facial landmarks: nose tip + glabella with pitch weighting
                         nose_point = landmarks[NOSE_TIP_IDX]
                         glabella_point = landmarks[GLABELLA_IDX]
-                        ry = float(0.55 * nose_point.y + 0.45 * glabella_point.y)
+                        ry = float(0.40 * glabella_point.y + 0.60 * nose_point.y)
                         nose_x = nose_point.x * w
                         nose_y = nose_point.y * h
 
@@ -576,12 +567,20 @@ class FaceMeshTracker:
                             "fy": nose_y - det_fh * 0.5,
                             "fw": det_fw, "fh": det_fh,
                             "nose_x": nose_x, "nose_y": nose_y,
+                            "landmarks": landmarks,
                         })
             except Exception as exc:
                 logger.debug("MediaPipe multi-face exception: %s", exc)
 
-        # ─── 3. Haar Cascade fallback (Runs ONLY if YuNet and MediaPipe are absent) ───
-        elif self._cascade is not None and not self._cascade.empty():
+        # ─── 2. OpenCV YuNet DNN fallback (Runs if MediaPipe is absent or detected 0 faces) ───
+        if not faces and self._yunet is not None:
+            try:
+                faces = self._yunet_detect_multi(frame, w, h)
+            except Exception as exc:
+                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
+
+        # ─── 3. Haar Cascade fallback (Runs if MediaPipe and YuNet are absent or detected 0 faces) ───
+        if not faces and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
                 faces.append({
@@ -855,6 +854,19 @@ class FaceMeshTracker:
             ny = int(p1_face.get("nose_y", fy + fh * 0.5) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (0, 255, 200), -1)
 
+            # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
+            if "landmarks" in p1_face:
+                pts = p1_face["landmarks"]
+                for idx in CONTOUR_KEYPOINTS:
+                    px = int(pts[idx].x * preview_w)
+                    py = int(pts[idx].y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 1, (0, 240, 255), -1)
+                # Extra facial mesh features (glabella, nose bridge, eyes)
+                for f_idx in (168, 10, 152, 33, 263, 61, 291):
+                    px = int(pts[f_idx].x * preview_w)
+                    py = int(pts[f_idx].y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 1, (0, 255, 220), -1)
+
         # Render Player 2 (Crimson/Red)
         if p2_face is not None:
             fx, fy, fw, fh = p2_face["fx"], p2_face["fy"], p2_face["fw"], p2_face["fh"]
@@ -868,6 +880,18 @@ class FaceMeshTracker:
             nx = int(p2_face.get("nose_x", fx + fw * 0.5) * scale_x)
             ny = int(p2_face.get("nose_y", fy + fh * 0.5) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (255, 60, 90), -1)
+
+            # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
+            if "landmarks" in p2_face:
+                pts = p2_face["landmarks"]
+                for idx in CONTOUR_KEYPOINTS:
+                    px = int(pts[idx].x * preview_w)
+                    py = int(pts[idx].y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 1, (255, 60, 90), -1)
+                for f_idx in (168, 10, 152, 33, 263, 61, 291):
+                    px = int(pts[f_idx].x * preview_w)
+                    py = int(pts[f_idx].y * preview_h)
+                    cv2.circle(hud_frame, (px, py), 1, (255, 120, 160), -1)
 
         # Status text at bottom of PIP
         if self.is_pvp:
