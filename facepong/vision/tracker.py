@@ -415,16 +415,17 @@ class FaceMeshTracker:
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
 
-            # Smooth soft deadband: cancels camera sensor micro-quantization when head is stationary (<0.0042)
-            # with smooth Hermite transition to eliminate any discrete threshold step
+            # Stationary micro-noise gate: eliminates camera sensor quantization jitter (<0.0032)
+            # when stationary, while disengaging during active motion to eliminate stick-slip stutter
             if not is_first and last_raw > 0:
                 diff_raw = abs(raw_y - last_raw)
-                if diff_raw < 0.0042:
-                    raw_y = last_raw
-                elif diff_raw < 0.0092:
-                    t_blend = (diff_raw - 0.0042) / 0.0050
-                    blend = t_blend * t_blend * (3.0 - 2.0 * t_blend)
-                    raw_y = last_raw + (raw_y - last_raw) * blend
+                if abs(vel) < 0.15:
+                    if diff_raw < 0.0032:
+                        raw_y = last_raw
+                    elif diff_raw < 0.0072:
+                        t_blend = (diff_raw - 0.0032) / 0.0040
+                        blend = t_blend * t_blend * (3.0 - 2.0 * t_blend)
+                        raw_y = last_raw + (raw_y - last_raw) * blend
 
             # Slew-rate limiter: prevents anomalous single-frame video glints while allowing instant fast flicks
             if not is_first and last_raw > 0:
@@ -470,16 +471,16 @@ class FaceMeshTracker:
             c_min = 0
 
         # Linear ergonomic pitch mapping:
-        # Looking down is slightly stiffer on the neck than looking up.
-        # An asymmetric downward span (0.85x) makes looking down reach the bottom effortlessly.
+        # Looking up involves tilting head back against gravity (cervical extension has less angular displacement)
+        # An ergonomic upward span (0.50x) ensures reaching the top wall is effortless and natural.
         if raw_y <= mid_b:
-            # Looking UP
-            half_span_up = max(0.01, (mid_b - min_b) * 1.05)
+            # Looking UP: responsive 0.50x span ensures comfortable ceiling reach without neck strain
+            half_span_up = max(0.01, (mid_b - min_b) * 0.50)
             norm = min(1.0, max(0.0, (mid_b - raw_y) / half_span_up))
             linear_y = 0.5 - 0.5 * norm
         else:
-            # Looking DOWN: responsive span (0.85x) for easy, subtle downward nods
-            half_span_down = max(0.01, (max_b - mid_b) * 0.85)
+            # Looking DOWN: responsive 0.60x span for effortless floor reach
+            half_span_down = max(0.01, (max_b - mid_b) * 0.60)
             norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
             linear_y = 0.5 + 0.5 * norm
 
@@ -722,9 +723,9 @@ class FaceMeshTracker:
             lm_y = float(face[13] * detect_scale_y)
 
             # Anatomical mid-face anchor: rigid skull landmarks (eyes midpoint + nose tip)
-            # Eliminates YuNet bounding box edge jitter (fy, fh) while maintaining full analog head tilt travel
+            # Weighting nose tip (0.60) captures natural head pitch rotation, making upward nods highly responsive
             glabella_y = 0.5 * (re_y + le_y)
-            anchor_y = 0.55 * glabella_y + 0.45 * nose_y
+            anchor_y = 0.40 * glabella_y + 0.60 * nose_y
             raw_y = float(anchor_y / float(h))
 
             center_x = fx + fw * 0.5
@@ -981,8 +982,8 @@ class VisionPipeline:
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS with instant event-driven wakeup."""
         while self._is_running:
-            # Wait for camera thread to deliver a fresh frame (zero polling latency)
-            self.camera.frame_ready_event.wait(timeout=0.035)
+            # Wait for camera thread to deliver a fresh frame (zero polling latency, generous fallback timeout)
+            self.camera.frame_ready_event.wait(timeout=0.100)
             self.camera.frame_ready_event.clear()
 
             # Detect hardware camera switch (e.g. unplug USB -> fallback to integrated)
