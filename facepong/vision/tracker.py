@@ -642,7 +642,9 @@ class FaceMeshTracker:
         setattr(self, prev_attr, gray.copy())
         return (last_klt_y if last_klt_y is not None else 0.5), None
 
-    def process_frame(self, frame: np.ndarray) -> Tuple[bool, float, float, np.ndarray]:
+    def process_frame(
+        self, frame: np.ndarray, current_time: Optional[float] = None
+    ) -> Tuple[bool, float, float, np.ndarray]:
         """
         Executes face detection supporting 1 or 2 players simultaneously.
         Partitions candidates horizontally: Leftmost = Player 1, Rightmost = Player 2.
@@ -654,7 +656,7 @@ class FaceMeshTracker:
             frame = cv2.flip(frame, 1)
 
         h, w, _ = frame.shape
-        now = time.perf_counter()
+        now = current_time if current_time is not None else time.perf_counter()
 
         faces: List[dict] = []
 
@@ -1258,9 +1260,10 @@ class VisionPipeline:
 
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS with instant event-driven wakeup."""
+        last_processed_frame_id = -1
         while self._is_running:
             # Wait for camera thread to deliver a fresh frame (zero polling latency, responsive fallback timeout)
-            self.camera.frame_ready_event.wait(timeout=0.035)
+            self.camera.frame_ready_event.wait(timeout=0.08)
             self.camera.frame_ready_event.clear()
 
             # Detect hardware camera switch (e.g. unplug USB -> fallback to integrated)
@@ -1270,12 +1273,15 @@ class VisionPipeline:
                 self.tracker.reset_for_new_camera()
                 logger.info("VisionPipeline detected camera device change (counter %d). Resetting tracker.", dev_counter)
 
-            has_frame, frame = self.camera.read(copy=False)
-            if has_frame and frame is not None:
-                detected, raw_y, smoothed_y, hud_preview = self.tracker.process_frame(frame)
-                now = time.perf_counter()
+            has_frame, frame, frame_id, frame_time = self.camera.read_metadata(copy=False)
+            if not has_frame or frame is None or frame_id == last_processed_frame_id:
+                continue
+            last_processed_frame_id = frame_id
 
-                with self._lock:
+            detected, raw_y, smoothed_y, hud_preview = self.tracker.process_frame(frame, current_time=frame_time)
+            now = frame_time if frame_time > 0.0 else time.perf_counter()
+
+            with self._lock:
                     self._state.face_detected = detected
                     self._state.raw_y = raw_y
                     self._state.smoothed_y = smoothed_y

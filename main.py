@@ -33,7 +33,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--cam-height", type=int, default=240, help="Camera capture height (default: 240)")
     parser.add_argument("--profile", type=str, default="AUTO", choices=["AUTO", "TV", "LAPTOP", "TABLET"], help="Device sensitivity profile (default: AUTO)")
     parser.add_argument("--alpha", type=float, default=0.26, help="EMA smoothing factor for head tracking (default: 0.26)")
-    parser.add_argument("--sensitivity", type=float, default=2.4, help="Head motion sensitivity multiplier (default: 2.4)")
+    parser.add_argument("--sensitivity", type=float, default=1.8, help="Head motion sensitivity multiplier (default: 1.8)")
     parser.add_argument("--timeout", type=float, default=5.0, help="Player absence timeout in seconds (default: 5.0)")
     parser.add_argument("--win-score", type=int, default=5, help="Points needed to win match (default: 5)")
     parser.add_argument("--no-sound", action="store_true", help="Disable procedural audio synthesis")

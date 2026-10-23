@@ -84,13 +84,8 @@ def probe_available_cameras(exclude_index: Optional[int] = None) -> List[Tuple[i
                 else:
                     dev_subindex = 0
 
-                # Check if device is a real video capture device
-                # On Raspberry Pi, bcm2835-codec, bcm2835-isp, rpi-unicam create non-capture nodes
-                is_rpi_internal_subsystem = any(
-                    k in name.lower()
-                    for k in ("bcm2835", "unicam", "isp", "codec", "pisp")
-                )
-                if is_rpi_internal_subsystem and dev_subindex > 0:
+                # Filter out secondary metadata/ISP/codec nodes (index > 0)
+                if dev_subindex > 0:
                     continue
 
                 is_internal = any(
@@ -99,15 +94,8 @@ def probe_available_cameras(exclude_index: Optional[int] = None) -> List[Tuple[i
                 )
                 is_usb = ("usb" in device_link.lower()) and not is_internal
 
-                # On Raspberry Pi, only attempt open_video_capture if device is USB or confirmed capture
-                cap = open_video_capture(idx)
-                can_read = False
-                if cap is not None:
-                    ret, frame = cap.read()
-                    can_read = bool(ret and frame is not None)
-                    cap.release()
-
-                if not can_read:
+                dev_node = f"/dev/video{idx}"
+                if not os.path.exists(dev_node) or not os.access(dev_node, os.R_OK):
                     continue
 
                 if is_usb:
@@ -204,6 +192,8 @@ class ThreadedCamera:
         self._consecutive_failures = 0
         self._last_reconnect_attempt = 0.0
         self._last_usb_check = 0.0
+        self._frame_id = 0
+        self._frame_time = 0.0
         # Instant frame notification event for zero-latency pipeline wakeups
         self.frame_ready_event = threading.Event()
 
@@ -332,8 +322,11 @@ class ThreadedCamera:
                 success, frame = self._capture.read()
                 if success and frame is not None:
                     self._consecutive_failures = 0
+                    t_now = time.perf_counter()
                     with self._lock:
                         self._latest_frame = frame
+                        self._frame_id += 1
+                        self._frame_time = t_now
                     self.frame_ready_event.set()
                 else:
                     self._consecutive_failures += 1
@@ -343,8 +336,11 @@ class ThreadedCamera:
             else:
                 # Offline: generate synthetic placeholder
                 synth = self._generate_synthetic_frame()
+                t_now = time.perf_counter()
                 with self._lock:
                     self._latest_frame = synth
+                    self._frame_id += 1
+                    self._frame_time = t_now
                 self.frame_ready_event.set()
 
                 # Attempt reconnect every 1.5 seconds
@@ -375,6 +371,14 @@ class ThreadedCamera:
             if self._latest_frame is not None:
                 return True, (self._latest_frame.copy() if copy else self._latest_frame)
         return False, None
+
+    def read_metadata(self, copy: bool = False) -> Tuple[bool, Optional[np.ndarray], int, float]:
+        """Returns (has_frame, frame, frame_id, frame_timestamp)."""
+        with self._lock:
+            if self._latest_frame is not None:
+                f = self._latest_frame.copy() if copy else self._latest_frame
+                return True, f, self._frame_id, self._frame_time
+        return False, None, 0, 0.0
 
     @property
     def is_available(self) -> bool:
