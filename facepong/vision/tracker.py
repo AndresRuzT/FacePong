@@ -212,15 +212,15 @@ class FaceMeshTracker:
         self._init_detector()
 
     def get_filter_params(self) -> Tuple[float, float]:
-        """Returns (min_cutoff, beta) tuned for device profile and sensitivity."""
-        sens = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
+        """Returns (min_cutoff, beta) tuned for physical camera tracking space and sensitivity."""
+        sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
         if self.device_profile == DeviceProfile.TV:
-            return 0.85, 3.4 * sens
+            return 1.10, 1.9 * sens_ratio
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.85, 3.0 * sens
+            return 1.15, 1.8 * sens_ratio
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.80, 2.6 * sens
-        return 0.85, 3.0 * sens
+            return 1.20, 1.6 * sens_ratio
+        return 1.15, 1.8 * sens_ratio
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -232,7 +232,7 @@ class FaceMeshTracker:
           - TV: player is 1.5-3m away on a large display -> balanced ergonomic spread (~0.115)
           - LAPTOP: player is ~50cm away at desk -> effortless spread (~0.125)
           - TABLET: player is ~35cm away, close-up -> comfortable spread (~0.135)
-          - AUTO: detects screen resolution and scales with player ergonomics
+          - AUTO: scales with screen resolution and player ergonomics
         """
         if self.device_profile == DeviceProfile.TV:
             base_spread = 0.115
@@ -241,10 +241,8 @@ class FaceMeshTracker:
         elif self.device_profile == DeviceProfile.TABLET:
             base_spread = 0.135
         else:
-            # AUTO profile:
-            # TVs / large displays are >= 1000px height (subtly tighter spread for large field-of-view)
             sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
-            config_spread = getattr(self.config, "default_range_spread", 0.190)
+            config_spread = getattr(self.config, "default_range_spread", 0.170)
             std_spread = config_spread / (sensitivity ** 0.6)
             if self._screen_height >= 1000:
                 base_spread = std_spread * 0.90
@@ -402,7 +400,7 @@ class FaceMeshTracker:
     def _update_player_state(
         self, raw_y: float, face_height: float, frame_height: int, now: float, player_idx: int = 1
     ) -> float:
-        """Computes velocity, auto-baseline anchoring, distance scaling, non-linear curve, and EMA for P1 or P2."""
+        """Computes velocity, auto-baseline anchoring, physical One-Euro filtering, and ergonomic pitch mapping."""
         if player_idx == 1:
             last_raw = self._p1_last_valid_raw_y
             last_time = self._p1_last_raw_y_sample_time
@@ -437,17 +435,25 @@ class FaceMeshTracker:
                 elif (last_raw - raw_y) > max_step:
                     raw_y = last_raw - max_step
 
+        # One Euro Filter applied directly to raw physical camera coordinate:
+        # Filtering in physical sensor space wipes out 100% of sub-pixel noise and camera quantization
+        filt = self._p1_filter if player_idx == 1 else self._p2_filter
+        if is_first:
+            filt.reset(raw_y, now)
+            clean_raw_y = raw_y
+            raw_vel = 0.0
+        else:
+            clean_raw_y, raw_vel = filt.filter(raw_y, now)
+
         # Re-anchor baseline if needed
         if recenter or is_first:
             face_frac = (face_height / float(frame_height)) if (face_height > 0 and frame_height > 0) else None
             init_spread = self.get_effective_range_spread(face_frac)
-            min_b = max(0.02, raw_y - init_spread)
-            max_b = min(0.98, raw_y + init_spread)
-            smoothed = 0.5
+            min_b = max(0.02, clean_raw_y - init_spread)
+            max_b = min(0.98, clean_raw_y + init_spread)
             is_first = False
 
         # In AUTO mode, adapt sensitivity based on physical distance with deadband hysteresis
-        # only before calibration is fixed, preventing continuous micro-drift when stationary
         if not self._is_calibrated and self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
             target_spread = self.get_effective_range_spread(face_height / float(frame_height))
             curr_spread = 0.5 * (max_b - min_b)
@@ -457,51 +463,39 @@ class FaceMeshTracker:
                 min_b = max(0.02, mid_y - new_spread)
                 max_b = min(0.98, mid_y + new_spread)
 
-        span = max(0.01, max_b - min_b)
         mid_b = 0.5 * (min_b + max_b)
 
-        # Track clamped duration for telemetry only (no dynamic baseline drift during play
-        # to guarantee the paddle NEVER drifts or moves on its own while holding an angle)
-        if raw_y > max_b:
+        # Track clamped duration for telemetry
+        if clean_raw_y > max_b:
             c_max += 1
         else:
             c_max = 0
 
-        if raw_y < min_b:
+        if clean_raw_y < min_b:
             c_min += 1
         else:
             c_min = 0
 
-        # Linear ergonomic pitch mapping:
-        # Looking up involves tilting head back against gravity (cervical extension has less angular displacement)
-        # An ergonomic upward span (0.50x) ensures reaching the top wall is effortless and natural.
-        if raw_y <= mid_b:
-            # Looking UP: responsive 0.50x span ensures comfortable ceiling reach without neck strain
-            half_span_up = max(0.01, (mid_b - min_b) * 0.50)
-            norm = min(1.0, max(0.0, (mid_b - raw_y) / half_span_up))
+        # Ergonomic pitch mapping:
+        # Looking up involves cervical extension (0.70x span allows effortless ceiling reach without neck strain)
+        # Looking down involves cervical flexion (0.85x span allows natural floor reach)
+        if clean_raw_y <= mid_b:
+            half_span_up = max(0.01, (mid_b - min_b) * 0.70)
+            norm = min(1.0, max(0.0, (mid_b - clean_raw_y) / half_span_up))
             linear_y = 0.5 - 0.5 * norm
+            norm_vel = -0.5 * (raw_vel / half_span_up)
         else:
-            # Looking DOWN: responsive 0.60x span for effortless floor reach
-            half_span_down = max(0.01, (max_b - mid_b) * 0.60)
-            norm = min(1.0, max(0.0, (raw_y - mid_b) / half_span_down))
+            half_span_down = max(0.01, (max_b - mid_b) * 0.85)
+            norm = min(1.0, max(0.0, (clean_raw_y - mid_b) / half_span_down))
             linear_y = 0.5 + 0.5 * norm
+            norm_vel = 0.5 * (raw_vel / half_span_down)
 
-        mapped_y = float(np.clip(linear_y, 0.0, 1.0))
-
-        # One Euro Filter: adaptive low-pass filter providing 1:1 instantaneous response
-        # on active head nods while keeping the paddle completely stationary when holding still
-        filt = self._p1_filter if player_idx == 1 else self._p2_filter
-        if is_first:
-            filt.reset(mapped_y, now)
-            smoothed = mapped_y
-            vel = 0.0
-        else:
-            smoothed, vel = filt.filter(mapped_y, now)
-            smoothed = float(np.clip(smoothed, 0.0, 1.0))
+        smoothed = float(np.clip(linear_y, 0.0, 1.0))
+        vel = float(norm_vel)
 
         # Save back into state
         if player_idx == 1:
-            self._p1_last_valid_raw_y = raw_y
+            self._p1_last_valid_raw_y = clean_raw_y
             self._p1_last_raw_y_sample_time = now
             self._p1_last_valid_detection_time = now
             self._p1_is_first_sample = is_first
@@ -512,11 +506,11 @@ class FaceMeshTracker:
             self._p1_clamped_at_min_count = c_min
             self._p1_velocity_y = vel
             self._smoothed_y = smoothed
-            self._last_valid_raw_y = raw_y
+            self._last_valid_raw_y = clean_raw_y
             self._last_valid_detection_time = now
             self._is_first_sample = is_first
         else:
-            self._p2_last_valid_raw_y = raw_y
+            self._p2_last_valid_raw_y = clean_raw_y
             self._p2_last_raw_y_sample_time = now
             self._p2_last_valid_detection_time = now
             self._p2_is_first_sample = is_first
@@ -559,32 +553,29 @@ class FaceMeshTracker:
                 norm_dy = dy / float(h)
 
                 tracked_pts = valid_new.reshape(-1, 1, 2)
-
-                if last_klt_y is None:
-                    last_klt_y = det_anchor_y if det_anchor_y is not None else 0.5
-
-                flow_y = last_klt_y + norm_dy
+                last_ref = last_klt_y if last_klt_y is not None else (det_anchor_y if det_anchor_y is not None else 0.5)
 
                 if det_anchor_y is not None:
-                    # Complementary fusion: 82% sub-pixel optical flow + 18% absolute neural anchor
-                    fused_y = 0.82 * flow_y + 0.18 * det_anchor_y
+                    # High-frequency differential fusion: merges sub-pixel KLT delta with absolute anatomical anchor
+                    flow_predicted = last_ref + norm_dy
+                    fused_y = 0.50 * det_anchor_y + 0.50 * flow_predicted
                 else:
-                    fused_y = flow_y
+                    fused_y = last_ref + norm_dy
 
                 setattr(self, klt_y_attr, fused_y)
                 setattr(self, pts_attr, tracked_pts)
                 setattr(self, prev_attr, gray.copy())
                 return fused_y, tracked_pts
 
-        # Re-seed feature points on face bounding box
+        # Seed or refresh feature points on rigid facial triangle (eyes to nose bridge)
         if det_anchor_y is not None:
             setattr(self, klt_y_attr, det_anchor_y)
             fx, fy, fw, fh = face["fx"], face["fy"], face["fw"], face["fh"]
             mask = np.zeros_like(gray)
-            y1 = max(0, int(fy + 0.10 * fh))
-            y2 = min(h, int(fy + 0.85 * fh))
-            x1 = max(0, int(fx + 0.10 * fw))
-            x2 = min(w, int(fx + 0.90 * fw))
+            y1 = max(0, int(fy + 0.15 * fh))
+            y2 = min(h, int(fy + 0.70 * fh))
+            x1 = max(0, int(fx + 0.15 * fw))
+            x2 = min(w, int(fx + 0.85 * fw))
             mask[y1:y2, x1:x2] = 255
             new_features = cv2.goodFeaturesToTrack(
                 gray, maxCorners=25, qualityLevel=0.015, minDistance=5, mask=mask
@@ -810,10 +801,11 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # Anatomical mid-face anchor: rigid skull landmarks (eyes midpoint + nose tip)
-            # Weighting nose tip (0.60) captures natural head pitch rotation, making upward nods highly responsive
+            # Anatomical mid-face anchor: rigid skull landmarks (eyes midpoint + nose tip + bounding box center)
+            # Highly responsive to natural head pitch rotation while eliminating single-landmark flutter
             glabella_y = 0.5 * (re_y + le_y)
-            anchor_y = 0.40 * glabella_y + 0.60 * nose_y
+            box_center_y = fy + 0.5 * fh
+            anchor_y = 0.35 * glabella_y + 0.45 * nose_y + 0.20 * box_center_y
             raw_y = float(anchor_y / float(h))
 
             center_x = fx + fw * 0.5
@@ -1190,8 +1182,8 @@ class VisionPipeline:
     def _run_pipeline(self) -> None:
         """Continuous pipeline loop running at camera FPS with instant event-driven wakeup."""
         while self._is_running:
-            # Wait for camera thread to deliver a fresh frame (zero polling latency, generous fallback timeout)
-            self.camera.frame_ready_event.wait(timeout=0.100)
+            # Wait for camera thread to deliver a fresh frame (zero polling latency, responsive fallback timeout)
+            self.camera.frame_ready_event.wait(timeout=0.035)
             self.camera.frame_ready_event.clear()
 
             # Detect hardware camera switch (e.g. unplug USB -> fallback to integrated)
