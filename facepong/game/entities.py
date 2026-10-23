@@ -88,21 +88,38 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.034,
+        smooth_time: float = 0.036,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp).
+        Critically damped spring interpolation (SmoothDamp) with continuous target extrapolation.
         Bridges camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jumps.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
+        now = current_time if current_time is not None else time.perf_counter()
+        elapsed = max(0.0, now - self.target_sample_time) if self.target_sample_time > 0.0 else 0.0
+
+        # Continuous target extrapolation between camera frames (camera interval ~33ms):
+        # Keeps paddle advancing seamlessly at 60 FPS without waiting/stalling between 30 FPS camera frames.
+        if elapsed <= 0.038:
+            extrap = elapsed
+        elif elapsed < 0.076:
+            # Smooth Hermite decay over the next camera interval to prevent overshoot when stopping
+            t_decay = (elapsed - 0.038) / 0.038
+            decay = 1.0 - t_decay * t_decay * (3.0 - 2.0 * t_decay)
+            extrap = 0.038 + (elapsed - 0.038) * decay
+        else:
+            extrap = 0.038
+
+        live_target = self.target_y + self.target_velocity * extrap
+
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
-        effective_target = max(min_center, min(max_center, self.target_y))
+        effective_target = max(min_center, min(max_center, live_target))
 
         st = max(0.0001, smooth_time)
         omega = 2.0 / st
@@ -118,10 +135,8 @@ class Paddle:
         self.current_velocity = (self.current_velocity - omega * temp) * exp
         new_pos = temp_target + (change + temp) * exp
 
-        # Accurate directional overshoot check:
-        # Only snap if new_pos actually crossed effective_target in direction of travel
-        if (effective_target - self.y > 0.0 and new_pos > effective_target) or \
-           (effective_target - self.y < 0.0 and new_pos < effective_target):
+        # Gentle settling: only snap if within sub-pixel distance of stationary target
+        if abs(new_pos - effective_target) < 0.20 and abs(self.current_velocity) < 6.0 and abs(self.target_velocity) < 5.0:
             new_pos = effective_target
             self.current_velocity = 0.0
 

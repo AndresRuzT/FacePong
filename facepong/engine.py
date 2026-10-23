@@ -163,7 +163,7 @@ class GameEngine:
                 last_time = current_time
 
                 self._handle_events(dt)
-                self._update(dt)
+                self._update(dt, current_time)
                 self._render()
 
                 self.clock.tick(self.config.display.target_fps)
@@ -238,8 +238,9 @@ class GameEngine:
             else:
                 self._keyboard_active = False
 
-    def _update(self, dt: float) -> None:
+    def _update(self, dt: float, current_time: Optional[float] = None) -> None:
         """Updates game state machine, physics, and entities."""
+        now = current_time if current_time is not None else time.perf_counter()
         tracking_state = self.vision.get_state()
         state = self.state_mgr.current_state
 
@@ -297,17 +298,17 @@ class GameEngine:
             self._update_attract_mode(dt)
 
         elif state == ExhibitionState.CALIBRATING:
-            self._update_calibration_mode(dt, tracking_state)
+            self._update_calibration_mode(dt, tracking_state, now)
 
         elif state == ExhibitionState.PLAYING:
-            self._update_playing_mode(dt)
+            self._update_playing_mode(dt, now)
 
         elif state == ExhibitionState.POINT_SCORED:
             self._update_point_scored_mode(dt)
 
         elif state == ExhibitionState.GAME_OVER:
-            self.player_paddle.update(dt)
-            self.ai_paddle.update(dt)
+            self.player_paddle.update(dt, current_time=now)
+            self.ai_paddle.update(dt, current_time=now)
 
     def _update_attract_mode(self, dt: float) -> None:
         """Simulates autonomous gameplay demo during idle kiosk state."""
@@ -332,8 +333,9 @@ class GameEngine:
         self.ai_paddle.target_y = self.ball.y
         self.ai_paddle.update(dt, smooth_time=0.12)
 
-    def _update_calibration_mode(self, dt: float, tracking_state: TrackingState) -> None:
+    def _update_calibration_mode(self, dt: float, tracking_state: TrackingState, current_time: Optional[float] = None) -> None:
         """Executes calibration countdown before match start."""
+        now = current_time if current_time is not None else time.perf_counter()
         if self.state_mgr.is_pvp:
             if tracking_state.p1_detected:
                 self.player_paddle.set_target_normalized_y(
@@ -355,10 +357,9 @@ class GameEngine:
                     tracking_state.sample_time,
                 )
 
-        self.player_paddle.update(dt)
-        self.ai_paddle.update(dt)
+        self.player_paddle.update(dt, current_time=now)
+        self.ai_paddle.update(dt, current_time=now)
 
-        now = time.perf_counter()
         elapsed = now - self.state_mgr.state_enter_time
         duration = max(0.1, self.config.camera.calibration_duration_sec)
         self._calibration_progress = min(1.0, elapsed / duration)
@@ -383,11 +384,12 @@ class GameEngine:
             self._keyboard_p1_active = False
             self._keyboard_p2_active = False
 
-    def _update_playing_mode(self, dt: float) -> None:
+    def _update_playing_mode(self, dt: float, current_time: Optional[float] = None) -> None:
         """Advances active competitive gameplay physics and collisions."""
-        self.player_paddle.update(dt)
+        now = current_time if current_time is not None else time.perf_counter()
+        self.player_paddle.update(dt, current_time=now)
         if self.state_mgr.is_pvp:
-            self.ai_paddle.update(dt)
+            self.ai_paddle.update(dt, current_time=now)
         else:
             self.ai.update(
                 dt,

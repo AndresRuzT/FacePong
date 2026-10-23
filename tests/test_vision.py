@@ -228,13 +228,13 @@ class TestVisionTracker(unittest.TestCase):
         tracker = FaceMeshTracker(self.config)
         now = 100.0
         # Initialize at center
-        tracker._update_player_state(0.50, 60.0, 240, now, player_idx=1)
-        self.assertAlmostEqual(tracker._p1_last_valid_raw_y, 0.50)
+        s0 = tracker._update_player_state(0.50, 60.0, 240, now, player_idx=1)
+        self.assertAlmostEqual(s0, 0.50, delta=0.01)
 
         # Micro-noise fluctuation (+0.003, typical camera sensor noise)
-        tracker._update_player_state(0.503, 60.0, 240, now + 0.033, player_idx=1)
-        # Position should remain completely clamped to 0.50 (zero jitter)
-        self.assertAlmostEqual(tracker._p1_last_valid_raw_y, 0.50)
+        s1 = tracker._update_player_state(0.503, 60.0, 240, now + 0.033, player_idx=1)
+        # Position should remain smoothly stabilized near 0.50 without discontinuous steps
+        self.assertAlmostEqual(s1, 0.50, delta=0.015)
 
     def test_pitch_amplification_responds_to_head_nods(self):
         tracker = FaceMeshTracker(self.config)

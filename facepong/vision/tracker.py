@@ -207,12 +207,12 @@ class FaceMeshTracker:
         """Returns (min_cutoff, beta) tuned for device profile and sensitivity."""
         sens = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
         if self.device_profile == DeviceProfile.TV:
-            return 1.0, 2.6 * sens
+            return 0.85, 3.4 * sens
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.95, 2.2 * sens
+            return 0.85, 3.0 * sens
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.90, 1.8 * sens
-        return 0.95, 2.2 * sens
+            return 0.80, 2.6 * sens
+        return 0.85, 3.0 * sens
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -412,18 +412,6 @@ class FaceMeshTracker:
 
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
-
-            # Stationary micro-noise gate: eliminates camera sensor quantization jitter (<0.0032)
-            # when stationary, while disengaging during active motion to eliminate stick-slip stutter
-            if not is_first and last_raw > 0:
-                diff_raw = abs(raw_y - last_raw)
-                if abs(vel) < 0.15:
-                    if diff_raw < 0.0032:
-                        raw_y = last_raw
-                    elif diff_raw < 0.0072:
-                        t_blend = (diff_raw - 0.0032) / 0.0040
-                        blend = t_blend * t_blend * (3.0 - 2.0 * t_blend)
-                        raw_y = last_raw + (raw_y - last_raw) * blend
 
             # Slew-rate limiter: prevents anomalous single-frame video glints while allowing instant fast flicks
             if not is_first and last_raw > 0:
@@ -857,15 +845,27 @@ class FaceMeshTracker:
             # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
             if "landmarks" in p1_face:
                 pts = p1_face["landmarks"]
-                for idx in CONTOUR_KEYPOINTS:
-                    px = int(pts[idx].x * preview_w)
-                    py = int(pts[idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 1, (0, 240, 255), -1)
-                # Extra facial mesh features (glabella, nose bridge, eyes)
-                for f_idx in (168, 10, 152, 33, 263, 61, 291):
+                # 1. Face oval contour polyline
+                oval_pts = np.array([[int(pts[idx].x * preview_w), int(pts[idx].y * preview_h)] for idx in CONTOUR_KEYPOINTS], np.int32)
+                cv2.polylines(hud_frame, [oval_pts], isClosed=True, color=(0, 200, 220), thickness=1)
+
+                # 2. Facial features: eyes, eyebrows, nose bridge, lips
+                for feature_indices, is_closed in [
+                    ([33, 160, 158, 133, 153, 144], True),       # Left eye
+                    ([362, 385, 387, 263, 373, 380], True),     # Right eye
+                    ([70, 63, 105, 66, 107], False),            # Left eyebrow
+                    ([300, 293, 334, 296, 336], False),         # Right eyebrow
+                    ([168, 6, 197, 195, 5, 4], False),          # Nose bridge
+                    ([61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291], True),  # Lips
+                ]:
+                    f_pts = np.array([[int(pts[i].x * preview_w), int(pts[i].y * preview_h)] for i in feature_indices], np.int32)
+                    cv2.polylines(hud_frame, [f_pts], isClosed=is_closed, color=(0, 240, 255), thickness=1)
+
+                # Landmark dots at key tracking vertices
+                for f_idx in (1, 33, 263, 61, 291, 168, 10, 152):
                     px = int(pts[f_idx].x * preview_w)
                     py = int(pts[f_idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 1, (0, 255, 220), -1)
+                    cv2.circle(hud_frame, (px, py), 2, (0, 255, 230), -1)
 
         # Render Player 2 (Crimson/Red)
         if p2_face is not None:
@@ -884,14 +884,27 @@ class FaceMeshTracker:
             # Draw futuristic cybernetic wireframe landmarks if available from MediaPipe
             if "landmarks" in p2_face:
                 pts = p2_face["landmarks"]
-                for idx in CONTOUR_KEYPOINTS:
-                    px = int(pts[idx].x * preview_w)
-                    py = int(pts[idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 1, (255, 60, 90), -1)
-                for f_idx in (168, 10, 152, 33, 263, 61, 291):
+                # 1. Face oval contour polyline
+                oval_pts = np.array([[int(pts[idx].x * preview_w), int(pts[idx].y * preview_h)] for idx in CONTOUR_KEYPOINTS], np.int32)
+                cv2.polylines(hud_frame, [oval_pts], isClosed=True, color=(220, 50, 80), thickness=1)
+
+                # 2. Facial features: eyes, eyebrows, nose bridge, lips
+                for feature_indices, is_closed in [
+                    ([33, 160, 158, 133, 153, 144], True),       # Left eye
+                    ([362, 385, 387, 263, 373, 380], True),     # Right eye
+                    ([70, 63, 105, 66, 107], False),            # Left eyebrow
+                    ([300, 293, 334, 296, 336], False),         # Right eyebrow
+                    ([168, 6, 197, 195, 5, 4], False),          # Nose bridge
+                    ([61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291], True),  # Lips
+                ]:
+                    f_pts = np.array([[int(pts[i].x * preview_w), int(pts[i].y * preview_h)] for i in feature_indices], np.int32)
+                    cv2.polylines(hud_frame, [f_pts], isClosed=is_closed, color=(255, 80, 120), thickness=1)
+
+                # Landmark dots at key tracking vertices
+                for f_idx in (1, 33, 263, 61, 291, 168, 10, 152):
                     px = int(pts[f_idx].x * preview_w)
                     py = int(pts[f_idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 1, (255, 120, 160), -1)
+                    cv2.circle(hud_frame, (px, py), 2, (255, 140, 180), -1)
 
         # Status text at bottom of PIP
         if self.is_pvp:
