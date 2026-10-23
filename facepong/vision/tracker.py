@@ -198,6 +198,8 @@ class FaceMeshTracker:
         # Detectors
         self._face_mesh = None
         self._yunet = None
+        self._rfb_net: Optional[cv2.dnn.Net] = None
+        self._rfb_priors: Optional[np.ndarray] = None
         self._cascade = None
 
         # YuNet ROI tracking state (2-phase detection: ROI fast path + full scan fallback)
@@ -313,15 +315,29 @@ class FaceMeshTracker:
                     model=yunet_path,
                     config="",
                     input_size=(320, 240),
-                    score_threshold=0.25,
+                    score_threshold=0.15,
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized as fallback (320x240, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized as fallback (320x240, score_thresh 0.15, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
-        # 3. OpenCV Haar Cascade as emergency fallback
+        # 3. Ultra-Light-Fast-Generic-Face-Detector (RFB-320 ONNX) for extreme distance & partial occlusion
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            rfb_path = os.path.join(current_dir, "version-RFB-320.onnx")
+            if os.path.exists(rfb_path):
+                net = cv2.dnn.readNetFromONNX(rfb_path)
+                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+                self._rfb_net = net
+                self._rfb_priors = self._generate_rfb_priors((320, 240))
+                logger.info("Ultra-Light-Fast-Face RFB-320 DNN initialized: %s", rfb_path)
+        except Exception as exc:
+            logger.warning("RFB-320 initialization failed: %s", exc)
+
+        # 4. OpenCV Haar Cascade as emergency fallback
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             bundled_path = os.path.join(current_dir, "haarcascade_frontalface_default.xml")
@@ -387,7 +403,7 @@ class FaceMeshTracker:
             self._last_valid_raw_y = neutral_y
             self._p1_last_deadband_y = neutral_y
             self._p1_klt_y = neutral_y
-            self._p1_filter.reset(0.5)
+            self._p1_filter.reset(neutral_y)
             logger.info(
                 "Calibrated P1 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._min_y_bound, self._max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -399,7 +415,7 @@ class FaceMeshTracker:
             self._p2_last_valid_raw_y = neutral_y
             self._p2_last_deadband_y = neutral_y
             self._p2_klt_y = neutral_y
-            self._p2_filter.reset(0.5)
+            self._p2_filter.reset(neutral_y)
             logger.info(
                 "Calibrated P2 head range: [%.2f, %.2f] around neutral %.2f (spread: ±%.3f, profile: %s)",
                 self._p2_min_y_bound, self._p2_max_y_bound, neutral_y, range_spread, self.device_profile.value,
@@ -474,49 +490,77 @@ class FaceMeshTracker:
             else:
                 self._p2_last_deadband_y = clean_raw_y
 
-        # Re-anchor baseline if needed
-        if recenter or is_first:
-            face_frac = (face_height / float(frame_height)) if (face_height > 0 and frame_height > 0) else None
-            init_spread = self.get_effective_range_spread(face_frac)
-            min_b = max(0.02, clean_raw_y - init_spread)
-            max_b = min(0.98, clean_raw_y + init_spread)
+        # Distance-adaptive dynamic range spread based on face size
+        face_frac = (face_height / float(frame_height)) if (face_height > 0 and frame_height > 0) else None
+        target_spread = self.get_effective_range_spread(face_frac)
+
+        # Baseline anchoring and continuous dynamic auto-centering
+        time_since_last = (now - last_time) if last_time > 0 else 999.0
+        if recenter or is_first or (not self._is_calibrated and time_since_last > 1.0):
+            # Immediate lock: resting posture becomes immediate arena center (y = 0.50)
+            mid_b = clean_raw_y
+            min_b = max(0.02, mid_b - target_spread)
+            max_b = min(0.98, mid_b + target_spread)
             is_first = False
-
-        # In AUTO mode, adapt sensitivity based on physical distance with deadband hysteresis
-        if not self._is_calibrated and self.device_profile == DeviceProfile.AUTO and face_height > 0 and frame_height > 0:
-            target_spread = self.get_effective_range_spread(face_height / float(frame_height))
-            curr_spread = 0.5 * (max_b - min_b)
-            if abs(target_spread - curr_spread) > 0.012:
-                new_spread = 0.95 * curr_spread + 0.05 * target_spread
-                mid_y = 0.5 * (min_b + max_b)
-                min_b = max(0.02, mid_y - new_spread)
-                max_b = min(0.98, mid_y + new_spread)
-
-        mid_b = 0.5 * (min_b + max_b)
-
-        # Track clamped duration for telemetry
-        if clean_raw_y > max_b:
-            c_max += 1
-        else:
-            c_max = 0
-
-        if clean_raw_y < min_b:
-            c_min += 1
-        else:
             c_min = 0
+            c_max = 0
+        else:
+            mid_b = 0.5 * (min_b + max_b)
 
-        # Ergonomic pitch mapping:
+            if not self._is_calibrated:
+                # 1. Gentle continuous drift towards resting center when stationary
+                if abs(raw_vel) < 0.05 and (min_b + 0.01) < clean_raw_y < (max_b - 0.01):
+                    drift_step = np.clip(0.03 * dt_s * (clean_raw_y - mid_b), -0.002, 0.002)
+                    mid_b += float(drift_step)
+
+                # 2. Anti-stuck boundary relaxation: prevents paddle from locking against ceiling or floor
+                if clean_raw_y < min_b:
+                    c_min += 1
+                    if c_min > 8:  # ~0.25s clamped at top
+                        mid_b += (clean_raw_y - min_b) * 0.15
+                else:
+                    c_min = 0
+
+                if clean_raw_y > max_b:
+                    c_max += 1
+                    if c_max > 8:  # ~0.25s clamped at bottom
+                        mid_b += (clean_raw_y - max_b) * 0.15
+                else:
+                    c_max = 0
+
+                # Spread adaptation for distance changes
+                curr_spread = 0.5 * (max_b - min_b)
+                if abs(target_spread - curr_spread) > 0.008:
+                    curr_spread = 0.95 * curr_spread + 0.05 * target_spread
+                min_b = max(0.02, mid_b - curr_spread)
+                max_b = min(0.98, mid_b + curr_spread)
+                mid_b = 0.5 * (min_b + max_b)
+            else:
+                # In calibrated mode: baseline bounds remain strictly anchored as calibrated
+                if clean_raw_y < min_b:
+                    c_min += 1
+                else:
+                    c_min = 0
+
+                if clean_raw_y > max_b:
+                    c_max += 1
+                else:
+                    c_max = 0
+
+        # Ergonomic pitch mapping with cubic Hermite smoothstep:
         # Looking up involves cervical extension (0.70x span allows effortless ceiling reach without neck strain)
         # Looking down involves cervical flexion (0.85x span allows natural floor reach)
         if clean_raw_y <= mid_b:
             half_span_up = max(0.01, (mid_b - min_b) * 0.70)
             norm = min(1.0, max(0.0, (mid_b - clean_raw_y) / half_span_up))
-            linear_y = 0.5 - 0.5 * norm
+            smooth_norm = norm * norm * (3.0 - 2.0 * norm)
+            linear_y = 0.5 - 0.5 * smooth_norm
             norm_vel = -0.5 * (raw_vel / half_span_up)
         else:
             half_span_down = max(0.01, (max_b - mid_b) * 0.85)
             norm = min(1.0, max(0.0, (clean_raw_y - mid_b) / half_span_down))
-            linear_y = 0.5 + 0.5 * norm
+            smooth_norm = norm * norm * (3.0 - 2.0 * norm)
+            linear_y = 0.5 + 0.5 * smooth_norm
             norm_vel = 0.5 * (raw_vel / half_span_down)
 
         smoothed = float(np.clip(linear_y, 0.0, 1.0))
@@ -671,7 +715,14 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
 
-        # ─── 3. Haar Cascade fallback (Runs if MediaPipe and YuNet are absent or detected 0 faces) ───
+        # ─── 3. Ultra-Light-Fast-Generic-Face-Detector (RFB-320) fallback ───
+        if not faces and self._rfb_net is not None:
+            try:
+                faces = self._rfb_detect_multi(frame, w, h)
+            except Exception as exc:
+                logger.debug("RFB-320 multi-face process exception: %s", exc)
+
+        # ─── 4. Haar Cascade fallback (Runs if MediaPipe, YuNet, and RFB are absent or detected 0 faces) ───
         if not faces and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
@@ -801,7 +852,7 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.20:
+            if score < 0.15:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
@@ -861,6 +912,106 @@ class FaceMeshTracker:
                 deduped.append(cand)
 
         # Sort horizontally: leftmost is first, rightmost is last
+        deduped.sort(key=lambda f: f["center_x"])
+        return deduped
+
+    @staticmethod
+    def _generate_rfb_priors(image_size: Tuple[int, int] = (320, 240)) -> np.ndarray:
+        """Precomputes anchor priors for Ultra-Light-Fast-Face RFB-320 ONNX network."""
+        w, h = image_size
+        feature_maps = [[math.ceil(h / s), math.ceil(w / s)] for s in [8, 16, 32, 64]]
+        min_boxes = [[10, 16, 24], [32, 48], [64, 96], [128, 192, 256]]
+        strides = [8, 16, 32, 64]
+        priors = []
+        for k, (f_h, f_w) in enumerate(feature_maps):
+            scale_w = w / strides[k]
+            scale_h = h / strides[k]
+            for i in range(f_h):
+                for j in range(f_w):
+                    cx = (j + 0.5) / scale_w
+                    cy = (i + 0.5) / scale_h
+                    for min_box in min_boxes[k]:
+                        priors.append([cx, cy, min_box / w, min_box / h])
+        return np.array(priors, dtype=np.float32)
+
+    def _rfb_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
+        """
+        Detects faces using Ultra-Light-Fast-Face RFB-320 ONNX network.
+        Specialized for edge inference, distance (1-2m), and partial face occlusion.
+        """
+        if self._rfb_net is None or self._rfb_priors is None:
+            return []
+
+        detect_w, detect_h = min(320, w), min(240, h)
+        if w != detect_w or h != detect_h:
+            detect_frame = cv2.resize(frame, (detect_w, detect_h), interpolation=cv2.INTER_LINEAR)
+            detect_scale_x = w / float(detect_w)
+            detect_scale_y = h / float(detect_h)
+        else:
+            detect_frame = frame
+            detect_scale_x = 1.0
+            detect_scale_y = 1.0
+
+        blob = cv2.dnn.blobFromImage(
+            detect_frame, 1.0 / 128.0, (detect_w, detect_h), (127.0, 127.0, 127.0), swapRB=True
+        )
+        self._rfb_net.setInput(blob)
+        scores, boxes = self._rfb_net.forward(["scores", "boxes"])
+
+        conf = scores[0, :, 1]
+        score_thresh = 0.50
+        mask = conf > score_thresh
+        if not np.any(mask):
+            return []
+
+        sub_conf = conf[mask]
+        sub_boxes = boxes[0, mask, :]
+        sub_priors = self._rfb_priors[mask, :]
+
+        cx = sub_priors[:, 0] + sub_boxes[:, 0] * 0.1 * sub_priors[:, 2]
+        cy = sub_priors[:, 1] + sub_boxes[:, 1] * 0.1 * sub_priors[:, 3]
+        bw = sub_priors[:, 2] * np.exp(sub_boxes[:, 2] * 0.2)
+        bh = sub_priors[:, 3] * np.exp(sub_boxes[:, 3] * 0.2)
+
+        x1 = (cx - bw * 0.5) * detect_w * detect_scale_x
+        y1 = (cy - bh * 0.5) * detect_h * detect_scale_y
+        bw = bw * detect_w * detect_scale_x
+        bh = bh * detect_h * detect_scale_y
+
+        cv_boxes = [[int(x1[i]), int(y1[i]), int(bw[i]), int(bh[i])] for i in range(len(x1))]
+        cv_scores = [float(sub_conf[i]) for i in range(len(sub_conf))]
+
+        indices = cv2.dnn.NMSBoxes(cv_boxes, cv_scores, score_thresh, 0.3)
+        results = []
+        if len(indices) > 0:
+            for idx in indices.flatten():
+                bx, by, bw_i, bh_i = cv_boxes[idx]
+                if bh_i < 8 or bw_i < 8:
+                    continue
+                raw_y = (by + bh_i * 0.45) / float(h)
+                results.append({
+                    "raw_y": float(raw_y),
+                    "center_x": float(bx + bw_i * 0.5),
+                    "fx": float(bx), "fy": float(by), "fw": float(bw_i), "fh": float(bh_i),
+                    "nose_x": float(bx + bw_i * 0.5), "nose_y": float(by + bh_i * 0.45),
+                    "score": float(cv_scores[idx]),
+                })
+
+        if not results:
+            return []
+
+        # Deduplicate vertical artifacts
+        deduped = []
+        results.sort(key=lambda f: f["fy"])
+        for cand in results:
+            is_chest_artifact = False
+            for kept in deduped:
+                if abs(cand["center_x"] - kept["center_x"]) < (0.16 * w):
+                    is_chest_artifact = True
+                    break
+            if not is_chest_artifact:
+                deduped.append(cand)
+
         deduped.sort(key=lambda f: f["center_x"])
         return deduped
 

@@ -352,5 +352,35 @@ class TestVisionTracker(unittest.TestCase):
         self.assertGreater(vel1, 1.5)
 
 
+    def test_auto_centering_initializes_at_natural_sitting_position(self):
+        """Verifies that an uncalibrated player sitting at raw_y=0.35 immediately centers at paddle=0.50."""
+        tracker = FaceMeshTracker(self.config)
+        t = 100.0
+        # Player sits down with head in upper half of camera image (raw_y = 0.35)
+        paddle_y = tracker._update_player_state(0.35, 60.0, 240, t, player_idx=1)
+        # Paddle must immediately center at 0.50 (±0.02) without requiring manual calibration
+        self.assertAlmostEqual(paddle_y, 0.50, delta=0.03)
+
+    def test_anti_stuck_boundary_relaxation_unclumps_paddle(self):
+        """Verifies that holding posture outside current bounds relaxes bounds and unclumps paddle."""
+        tracker = FaceMeshTracker(self.config)
+        t = 100.0
+        # Initialize at 0.40
+        tracker._update_player_state(0.40, 60.0, 240, t, player_idx=1)
+        # User shifts posture significantly to 0.20 (above min_b) for 15 frames
+        for _ in range(15):
+            t += 0.033
+            p_y = tracker._update_player_state(0.20, 60.0, 240, t, player_idx=1)
+        # Bounds should have relaxed towards 0.20 instead of leaving user stuck forever
+        self.assertLess(tracker._min_y_bound, 0.30)
+
+    def test_rfb_320_detector_initialization_and_priors(self):
+        """Verifies RFB-320 ONNX network and prior generation."""
+        tracker = FaceMeshTracker(self.config)
+        self.assertIsNotNone(tracker._rfb_net)
+        self.assertIsNotNone(tracker._rfb_priors)
+        self.assertEqual(tracker._rfb_priors.shape, (4420, 4))
+
+
 if __name__ == "__main__":
     unittest.main()
