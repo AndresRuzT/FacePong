@@ -80,15 +80,15 @@ class TestVisionTracker(unittest.TestCase):
         # Profile cycling
         p1 = tracker.cycle_device_profile()
         self.assertEqual(p1, DeviceProfile.TV)
-        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.042)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.115)
 
         p2 = tracker.cycle_device_profile()
         self.assertEqual(p2, DeviceProfile.LAPTOP)
-        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.055)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.125)
 
         p3 = tracker.cycle_device_profile()
         self.assertEqual(p3, DeviceProfile.TABLET)
-        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.075)
+        self.assertAlmostEqual(tracker.get_effective_range_spread(), 0.135)
 
         p4 = tracker.cycle_device_profile()
         self.assertEqual(p4, DeviceProfile.AUTO)

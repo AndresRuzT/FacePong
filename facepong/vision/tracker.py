@@ -207,12 +207,12 @@ class FaceMeshTracker:
         """Returns (min_cutoff, beta) tuned for device profile and sensitivity."""
         sens = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
         if self.device_profile == DeviceProfile.TV:
-            return 1.1, 24.0 * sens
+            return 1.0, 2.6 * sens
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.95, 18.0 * sens
+            return 0.95, 2.2 * sens
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.85, 14.0 * sens
-        return 0.95, 18.0 * sens
+            return 0.90, 1.8 * sens
+        return 0.95, 2.2 * sens
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -221,31 +221,32 @@ class FaceMeshTracker:
     def get_effective_range_spread(self, face_height_fraction: Optional[float] = None) -> float:
         """
         Calculates optimal head motion spread standardized across device classes:
-          - TV: player is 1.5-3m away on a large display -> ultra-responsive spread (~0.042)
-          - LAPTOP: player is ~50cm away at desk -> balanced effortless spread (~0.055)
-          - TABLET: player is ~35cm away, close-up -> gentle spread (~0.075)
-          - AUTO: detects screen resolution and scales inversely with physical distance (face size)
+          - TV: player is 1.5-3m away on a large display -> balanced ergonomic spread (~0.115)
+          - LAPTOP: player is ~50cm away at desk -> effortless spread (~0.125)
+          - TABLET: player is ~35cm away, close-up -> comfortable spread (~0.135)
+          - AUTO: detects screen resolution and scales with player ergonomics
         """
         if self.device_profile == DeviceProfile.TV:
-            base_spread = 0.042
+            base_spread = 0.115
         elif self.device_profile == DeviceProfile.LAPTOP:
-            base_spread = 0.055
+            base_spread = 0.125
         elif self.device_profile == DeviceProfile.TABLET:
-            base_spread = 0.075
+            base_spread = 0.135
         else:
             # AUTO profile:
-            # TVs / large displays are >= 1000px height
+            # TVs / large displays are >= 1000px height (subtly tighter spread for large field-of-view)
+            sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 2.4))
+            config_spread = getattr(self.config, "default_range_spread", 0.190)
+            std_spread = config_spread / (sensitivity ** 0.6)
             if self._screen_height >= 1000:
-                base_spread = 0.046
+                base_spread = std_spread * 0.90
             else:
-                sensitivity = max(0.5, getattr(self.config, "head_sensitivity", 3.0))
-                config_spread = getattr(self.config, "default_range_spread", 0.080)
-                base_spread = config_spread / (sensitivity ** 0.5)
+                base_spread = std_spread
 
-        # Distance normalization: face size is inversely proportional to player distance
+        # Distance normalization: subtle compensation for player distance to maintain comfortable angular travel
         if face_height_fraction is not None and face_height_fraction > 0.04:
             ref_scale = 0.20  # reference face height fraction
-            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.75, 1.25))
+            dist_multiplier = float(np.clip(face_height_fraction / ref_scale, 0.88, 1.12))
             return float(base_spread * dist_multiplier)
 
         return float(base_spread)
@@ -414,14 +415,14 @@ class FaceMeshTracker:
         if last_time > 0:
             dt_s = max(0.001, now - last_time)
 
-            # Smooth soft deadband: cancels camera sensor micro-quantization when head is stationary (<0.0035)
+            # Smooth soft deadband: cancels camera sensor micro-quantization when head is stationary (<0.0042)
             # with smooth Hermite transition to eliminate any discrete threshold step
             if not is_first and last_raw > 0:
                 diff_raw = abs(raw_y - last_raw)
-                if diff_raw < 0.0035:
+                if diff_raw < 0.0042:
                     raw_y = last_raw
-                elif diff_raw < 0.0085:
-                    t_blend = (diff_raw - 0.0035) / 0.0050
+                elif diff_raw < 0.0092:
+                    t_blend = (diff_raw - 0.0042) / 0.0050
                     blend = t_blend * t_blend * (3.0 - 2.0 * t_blend)
                     raw_y = last_raw + (raw_y - last_raw) * blend
 
@@ -493,6 +494,7 @@ class FaceMeshTracker:
             vel = 0.0
         else:
             smoothed, vel = filt.filter(mapped_y, now)
+            smoothed = float(np.clip(smoothed, 0.0, 1.0))
 
         # Save back into state
         if player_idx == 1:
@@ -719,10 +721,10 @@ class FaceMeshTracker:
             lm_x = float(face[12] * detect_scale_x)
             lm_y = float(face[13] * detect_scale_y)
 
-            # Anatomical mid-face anchor: combines eyes + face center + nose tip for strong vertical responsiveness
+            # Anatomical mid-face anchor: rigid skull landmarks (eyes midpoint + nose tip)
+            # Eliminates YuNet bounding box edge jitter (fy, fh) while maintaining full analog head tilt travel
             glabella_y = 0.5 * (re_y + le_y)
-            face_center_y = fy + fh * 0.5
-            anchor_y = 0.40 * glabella_y + 0.35 * face_center_y + 0.25 * nose_y
+            anchor_y = 0.55 * glabella_y + 0.45 * nose_y
             raw_y = float(anchor_y / float(h))
 
             center_x = fx + fw * 0.5

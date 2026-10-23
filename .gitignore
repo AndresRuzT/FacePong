@@ -40,5 +40,6 @@ Thumbs.db
 
 # Media & Logs
 *.log
+*.mp4
 recordings/
 screenshots/

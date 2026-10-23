@@ -88,37 +88,21 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.022,
+        smooth_time: float = 0.034,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp) with continuous target extrapolation.
-        Bridges camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag and zero jumps.
+        Critically damped spring interpolation (SmoothDamp).
+        Bridges camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jumps.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
-        now = current_time if current_time is not None else time.perf_counter()
-        elapsed = (now - self.target_sample_time) if self.target_sample_time > 0.0 else 0.0
-
-        # Harmonious continuous extrapolation between camera tracking frames (typically 33ms):
-        # 1.0 plateau during normal camera interval window (up to 45ms),
-        # smoothly Hermite-decaying to 0 if no new camera frame arrives within 90ms (stopping overshoot)
-        if elapsed <= 0.045:
-            decay = 1.0
-        elif elapsed < 0.090:
-            t_decay = (elapsed - 0.045) / 0.045
-            decay = 1.0 - t_decay * t_decay * (3.0 - 2.0 * t_decay)
-        else:
-            decay = 0.0
-
-        live_target = self.target_y + (self.target_velocity * elapsed * decay)
-
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
-        effective_target = max(min_center, min(max_center, live_target))
+        effective_target = max(min_center, min(max_center, self.target_y))
 
         st = max(0.0001, smooth_time)
         omega = 2.0 / st

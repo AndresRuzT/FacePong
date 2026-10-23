@@ -37,7 +37,7 @@ class CameraConfig:
     # Sensitivity multiplier: balanced for natural, elegant head nods
     head_sensitivity: float = 2.4
     # Calibration range spread around neutral head position
-    default_range_spread: float = 0.110
+    default_range_spread: float = 0.190
     # Inactivity timeout (seconds) before resetting match to attract screen
     inactivity_timeout_sec: float = 5.0
     # Head position normalization defaults around neutral ~0.50
