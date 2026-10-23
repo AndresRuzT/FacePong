@@ -221,12 +221,12 @@ class FaceMeshTracker:
         """Returns (min_cutoff, beta) tuned for physical camera tracking space and sensitivity."""
         sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
         if self.device_profile == DeviceProfile.TV:
-            return 1.10, 1.9 * sens_ratio
+            return 0.90, 19.0 * sens_ratio
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 1.15, 1.8 * sens_ratio
+            return 0.90, 18.0 * sens_ratio
         elif self.device_profile == DeviceProfile.TABLET:
-            return 1.20, 1.6 * sens_ratio
-        return 1.15, 1.8 * sens_ratio
+            return 0.95, 16.0 * sens_ratio
+        return 0.90, 18.0 * sens_ratio
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -473,22 +473,26 @@ class FaceMeshTracker:
         else:
             clean_raw_y, raw_vel = filt.filter(raw_y, now)
 
-        # Micro-tremor deadband: eliminates resting camera sensor jitter and sub-pixel noise
+        # Continuous soft-knee noise gate: suppresses resting sensor micro-tremor without staircase quantization
+        # Smooth quadratic attenuation eliminates jumps and keeps 100% continuous fluid tracking
+        noise_threshold = 0.0025
         last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
-        deadband_thresh = 0.0040  # ~1.0px on a 240p image
         if is_first:
             if player_idx == 1:
                 self._p1_last_deadband_y = clean_raw_y
             else:
                 self._p2_last_deadband_y = clean_raw_y
-        elif abs(clean_raw_y - last_deadband) < deadband_thresh:
-            clean_raw_y = last_deadband
-            raw_vel = 0.0
         else:
-            if player_idx == 1:
-                self._p1_last_deadband_y = clean_raw_y
+            diff = clean_raw_y - last_deadband
+            abs_diff = abs(diff)
+            if abs_diff < noise_threshold:
+                gain = (abs_diff / noise_threshold) ** 2
+                clean_raw_y = last_deadband + diff * gain
             else:
-                self._p2_last_deadband_y = clean_raw_y
+                if player_idx == 1:
+                    self._p1_last_deadband_y = clean_raw_y
+                else:
+                    self._p2_last_deadband_y = clean_raw_y
 
         # Distance-adaptive dynamic range spread based on face size
         face_frac = (face_height / float(frame_height)) if (face_height > 0 and frame_height > 0) else None

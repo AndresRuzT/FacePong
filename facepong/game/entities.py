@@ -101,43 +101,22 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.028,
+        smooth_time: float = 0.038,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp) with continuous target interpolation.
+        Critically damped spring interpolation (SmoothDamp).
         Translates discrete camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jitter.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
-        now = current_time if current_time is not None else time.perf_counter()
-
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
 
-        # Continuous target evaluation via interpolation buffer (minimal 20ms buffer for 60 FPS continuity)
-        if len(self._target_history) >= 2:
-            render_time = now - 0.020
-            if render_time <= self._target_history[0][0]:
-                live_target = self._target_history[0][1]
-            elif render_time >= self._target_history[-1][0]:
-                live_target = self._target_history[-1][1]
-            else:
-                live_target = self._target_history[-1][1]
-                for i in range(len(self._target_history) - 1):
-                    t0, y0 = self._target_history[i]
-                    t1, y1 = self._target_history[i + 1]
-                    if t0 <= render_time <= t1:
-                        u = (render_time - t0) / max(0.0001, t1 - t0)
-                        live_target = y0 + u * (y1 - y0)
-                        break
-        else:
-            live_target = self.target_y
-
-        effective_target = max(min_center, min(max_center, live_target))
+        effective_target = max(min_center, min(max_center, self.target_y))
 
         st = max(0.0001, smooth_time)
         omega = 2.0 / st
