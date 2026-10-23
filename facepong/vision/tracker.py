@@ -224,12 +224,12 @@ class FaceMeshTracker:
         """Returns (min_cutoff, beta) tuned for physical camera tracking space and sensitivity."""
         sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 1.8)) / 1.8
         if self.device_profile == DeviceProfile.TV:
-            return 1.0, 1.8 * sens_ratio
+            return 0.90, 0.95 * sens_ratio
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 1.0, 1.5 * sens_ratio
+            return 0.85, 0.80 * sens_ratio
         elif self.device_profile == DeviceProfile.TABLET:
-            return 1.0, 1.2 * sens_ratio
-        return 1.0, 1.5 * sens_ratio
+            return 0.85, 0.70 * sens_ratio
+        return 0.85, 0.80 * sens_ratio
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -468,7 +468,7 @@ class FaceMeshTracker:
 
         # Continuous soft-knee noise gate: suppresses resting sensor micro-tremor without staircase quantization
         # Smooth quadratic attenuation eliminates jumps and keeps 100% continuous fluid tracking
-        noise_threshold = 0.0030
+        noise_threshold = 0.0015
         last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
         if is_first:
             if player_idx == 1:
@@ -505,12 +505,7 @@ class FaceMeshTracker:
             mid_b = 0.5 * (min_b + max_b)
 
             if not self._is_calibrated:
-                # 1. Gentle continuous drift towards resting center when stationary
-                if abs(raw_vel) < 0.05 and (min_b + 0.01) < clean_raw_y < (max_b - 0.01):
-                    drift_step = np.clip(0.03 * dt_s * (clean_raw_y - mid_b), -0.002, 0.002)
-                    mid_b += float(drift_step)
-
-                # 2. Anti-stuck boundary relaxation: prevents paddle from locking against ceiling or floor
+                # Anti-stuck boundary relaxation: prevents paddle from locking against ceiling or floor
                 if clean_raw_y < min_b:
                     c_min += 1
                     if c_min > 8:  # ~0.25s clamped at top
@@ -544,20 +539,18 @@ class FaceMeshTracker:
                 else:
                     c_max = 0
 
-        # Ergonomic pitch mapping with cubic Hermite smoothstep:
-        # Looking up involves cervical extension (0.70x span allows effortless ceiling reach without neck strain)
+        # Direct 1:1 responsive linear pitch mapping: instant, immediate reaction with zero deadband delay
+        # Looking up involves cervical extension (0.70x span allows effortless ceiling reach)
         # Looking down involves cervical flexion (0.85x span allows natural floor reach)
         if clean_raw_y <= mid_b:
             half_span_up = max(0.01, (mid_b - min_b) * 0.70)
             norm = min(1.0, max(0.0, (mid_b - clean_raw_y) / half_span_up))
-            smooth_norm = norm * norm * (3.0 - 2.0 * norm)
-            linear_y = 0.5 - 0.5 * smooth_norm
+            linear_y = 0.5 - 0.5 * norm
             norm_vel = 0.5 * (raw_vel / half_span_up)
         else:
             half_span_down = max(0.01, (max_b - mid_b) * 0.85)
             norm = min(1.0, max(0.0, (clean_raw_y - mid_b) / half_span_down))
-            smooth_norm = norm * norm * (3.0 - 2.0 * norm)
-            linear_y = 0.5 + 0.5 * smooth_norm
+            linear_y = 0.5 + 0.5 * norm
             norm_vel = 0.5 * (raw_vel / half_span_down)
 
         smoothed = float(np.clip(linear_y, 0.0, 1.0))
