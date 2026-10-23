@@ -212,8 +212,8 @@ class FaceMeshTracker:
 
         # One Euro Adaptive Low-Pass Filters (CHI 2012)
         min_cutoff, beta = self.get_filter_params()
-        self._p1_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
-        self._p2_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
+        self._p1_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=12.0)
+        self._p2_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=12.0)
 
         self._init_detector()
 
@@ -221,12 +221,12 @@ class FaceMeshTracker:
         """Returns (min_cutoff, beta) tuned for physical camera tracking space and sensitivity."""
         sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
         if self.device_profile == DeviceProfile.TV:
-            return 0.90, 19.0 * sens_ratio
+            return 0.90, 26.0 * sens_ratio
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.90, 18.0 * sens_ratio
+            return 0.90, 24.0 * sens_ratio
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.95, 16.0 * sens_ratio
-        return 0.90, 18.0 * sens_ratio
+            return 0.95, 20.0 * sens_ratio
+        return 0.90, 24.0 * sens_ratio
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -475,7 +475,7 @@ class FaceMeshTracker:
 
         # Continuous soft-knee noise gate: suppresses resting sensor micro-tremor without staircase quantization
         # Smooth quadratic attenuation eliminates jumps and keeps 100% continuous fluid tracking
-        noise_threshold = 0.0025
+        noise_threshold = 0.0010
         last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
         if is_first:
             if player_idx == 1:
@@ -726,8 +726,8 @@ class FaceMeshTracker:
             except Exception as exc:
                 logger.debug("RFB-320 multi-face process exception: %s", exc)
 
-        # ─── 4. Haar Cascade fallback (Runs if MediaPipe, YuNet, and RFB are absent or detected 0 faces) ───
-        if not faces and self._cascade is not None and not self._cascade.empty():
+        # ─── 4. Haar Cascade fallback (Emergency fallback only if no neural networks loaded) ───
+        if not faces and self._face_mesh is None and self._yunet is None and self._rfb_net is None and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
                 faces.append({
