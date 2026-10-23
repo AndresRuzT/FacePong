@@ -101,25 +101,25 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.018,
+        smooth_time: float = 0.024,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp) with real-time velocity feed-forward.
+        Critically damped spring interpolation (SmoothDamp).
         Translates discrete camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jitter.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
         now = current_time if current_time is not None else time.perf_counter()
-
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
 
-        # Real-time forward extrapolation for the in-between render frame (bridges 30 FPS camera to 60 FPS render)
-        if self.target_sample_time > 0.0:
+        # Real-time velocity extrapolation for the in-between render frame (bridges 30 FPS camera to 60 FPS render)
+        # Suppressed when stationary (< 15 px/s) to guarantee rock-solid resting paddle stability
+        if self.target_sample_time > 0.0 and abs(self.target_velocity) > 15.0:
             extrap_dt = min(0.035, max(0.0, now - self.target_sample_time))
             live_target = self.target_y + self.target_velocity * extrap_dt
         else:

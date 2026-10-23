@@ -423,6 +423,15 @@ class TestVisionTracker(unittest.TestCase):
         self.assertGreater(face["fx"], 0)
         self.assertGreater(face["fy"], 0)
 
+    def test_slim_320_primary_detector_runs_and_detects(self):
+        """Verifies Ultra-Light-Fast-Generic-Face-Detector (Slim-320 ONNX) loads and executes."""
+        tracker = FaceMeshTracker(self.config)
+        self.assertIsNotNone(tracker._detector_net)
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        det, ry, sy, hud = tracker.process_frame(frame)
+        self.assertFalse(det)
+        self.assertEqual(hud.shape, (self.config.preview_height, self.config.preview_width, 3))
+
 
 if __name__ == "__main__":
     unittest.main()

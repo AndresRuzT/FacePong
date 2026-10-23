@@ -215,10 +215,6 @@ class ThreadedCamera:
         for attempt in range(2):
             cap = open_video_capture(idx)
             if cap is not None and cap.isOpened():
-                try:
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                except Exception:
-                    pass
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)

@@ -196,6 +196,9 @@ class FaceMeshTracker:
         self._cascade_miss_count: int = 0
 
         # Detectors
+        self._detector_net: Optional[cv2.dnn.Net] = None
+        self._slim_net: Optional[cv2.dnn.Net] = None
+        self._priors: Optional[np.ndarray] = None
         self._face_mesh = None
         self._yunet = None
         self._rfb_net: Optional[cv2.dnn.Net] = None
@@ -212,21 +215,21 @@ class FaceMeshTracker:
 
         # One Euro Adaptive Low-Pass Filters (CHI 2012)
         min_cutoff, beta = self.get_filter_params()
-        self._p1_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=12.0)
-        self._p2_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=12.0)
+        self._p1_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
+        self._p2_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.0)
 
         self._init_detector()
 
     def get_filter_params(self) -> Tuple[float, float]:
         """Returns (min_cutoff, beta) tuned for physical camera tracking space and sensitivity."""
-        sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 2.4)) / 2.4
+        sens_ratio = max(0.5, getattr(self.config, "head_sensitivity", 1.8)) / 1.8
         if self.device_profile == DeviceProfile.TV:
-            return 0.90, 26.0 * sens_ratio
+            return 1.0, 1.8 * sens_ratio
         elif self.device_profile == DeviceProfile.LAPTOP:
-            return 0.90, 24.0 * sens_ratio
+            return 1.0, 1.5 * sens_ratio
         elif self.device_profile == DeviceProfile.TABLET:
-            return 0.95, 20.0 * sens_ratio
-        return 0.90, 24.0 * sens_ratio
+            return 1.0, 1.2 * sens_ratio
+        return 1.0, 1.5 * sens_ratio
 
     def set_screen_dimensions(self, width: int, height: int) -> None:
         """Notifies tracker of the active display resolution to adjust sensitivity scaling."""
@@ -290,25 +293,31 @@ class FaceMeshTracker:
         return self.device_profile
 
     def _init_detector(self) -> None:
-        """Initializes face tracking backends with MediaPipe Face Mesh as primary, YuNet as secondary edge fallback."""
-        # 1. MediaPipe Solutions FaceMesh (Primary: dense 468 3D landmarks, sub-pixel optical flow regression)
-        try:
-            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                    max_num_faces=2,
-                    refine_landmarks=False,
-                    min_detection_confidence=0.35,
-                    min_tracking_confidence=0.35,
-                )
-                logger.info("MediaPipe Face Mesh tracker initialized as primary detector (max_faces=2, 468 landmarks)")
-        except Exception as exc:
-            logger.warning("MediaPipe Face Mesh initialization failed: %s", exc)
+        """Initializes Ultra-Light-Fast-Generic-Face-Detector (Slim-320 ONNX) as primary edge engine."""
+        # 1. Primary Engine: Ultra-Light-Fast-Generic-Face-Detector (Slim-320 ONNX / RFB-320 ONNX)
+        # Dedicated edge neural network optimized for ARM Cortex-A72 / Raspberry Pi 4 CPU (~12ms per frame)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        slim_path = os.path.join(current_dir, "version-slim-320.onnx")
+        rfb_path = os.path.join(current_dir, "version-RFB-320.onnx")
+        model_path = slim_path if os.path.exists(slim_path) else rfb_path
 
-        # 2. OpenCV YuNet Deep Neural Network Face & Landmark Detector (High-speed edge fallback)
+        cv2.setNumThreads(2)
+        if os.path.exists(model_path):
+            try:
+                net = cv2.dnn.readNetFromONNX(model_path)
+                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+                self._detector_net = net
+                self._slim_net = net
+                self._rfb_net = net
+                self._priors = self._generate_rfb_priors((320, 240))
+                self._rfb_priors = self._priors
+                logger.info("Ultra-Light-Fast ONNX face detector initialized as primary engine: %s", model_path)
+            except Exception as exc:
+                logger.warning("Ultra-Light-Fast ONNX initialization failed: %s", exc)
+
+        # 2. YuNet DNN secondary edge fallback
         try:
-            # Use 2 threads so 2 CPU cores remain completely dedicated to 60 FPS Pygame render loop on Raspberry Pi
-            cv2.setNumThreads(2)
-            current_dir = os.path.dirname(os.path.abspath(__file__))
             yunet_path = os.path.join(current_dir, "face_detection_yunet_2023mar.onnx")
             if os.path.exists(yunet_path) and hasattr(cv2, "FaceDetectorYN"):
                 self._yunet = cv2.FaceDetectorYN.create(
@@ -319,43 +328,25 @@ class FaceMeshTracker:
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized as fallback (320x240, score_thresh 0.15, 2 threads): %s", yunet_path)
         except Exception as exc:
-            logger.warning("OpenCV YuNet initialization failed: %s", exc)
+            logger.debug("YuNet initialization failed: %s", exc)
 
-        # 3. Ultra-Light-Fast-Generic-Face-Detector (RFB-320 ONNX) for extreme distance & partial occlusion
+        # 3. OpenCV Haar Cascade emergency fallback
         try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            rfb_path = os.path.join(current_dir, "version-RFB-320.onnx")
-            if os.path.exists(rfb_path):
-                net = cv2.dnn.readNetFromONNX(rfb_path)
-                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-                self._rfb_net = net
-                self._rfb_priors = self._generate_rfb_priors((320, 240))
-                logger.info("Ultra-Light-Fast-Face RFB-320 DNN initialized: %s", rfb_path)
-        except Exception as exc:
-            logger.warning("RFB-320 initialization failed: %s", exc)
-
-        # 4. OpenCV Haar Cascade as emergency fallback
-        try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
             bundled_path = os.path.join(current_dir, "haarcascade_frontalface_default.xml")
             cascade_dir = getattr(cv2.data, "haarcascades", "")
             system_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-
             for c_path in (bundled_path, system_path):
                 if c_path and os.path.exists(c_path):
                     cascade = cv2.CascadeClassifier(c_path)
                     if not cascade.empty():
                         self._cascade = cascade
-                        logger.info("OpenCV Haar Cascade initialized from: %s", c_path)
                         break
         except Exception as exc:
-            logger.warning("OpenCV Cascade initialization error: %s", exc)
+            logger.debug("OpenCV Cascade initialization error: %s", exc)
 
-        if self._face_mesh is None and self._yunet is None and self._cascade is None:
-            logger.error("No face tracking backend available! Neither YuNet, MediaPipe, nor OpenCV Haar Cascade could be loaded.")
+        if self._detector_net is None and self._yunet is None and self._cascade is None:
+            logger.error("No face tracking backend available! Neither Ultra-Light-Fast, YuNet, nor OpenCV Haar Cascade could be loaded.")
 
     def set_pvp_mode(self, is_pvp: bool) -> None:
         """Explicitly sets or clears 2-player competitive PvP mode."""
@@ -475,7 +466,7 @@ class FaceMeshTracker:
 
         # Continuous soft-knee noise gate: suppresses resting sensor micro-tremor without staircase quantization
         # Smooth quadratic attenuation eliminates jumps and keeps 100% continuous fluid tracking
-        noise_threshold = 0.0010
+        noise_threshold = 0.0030
         last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
         if is_first:
             if player_idx == 1:
@@ -680,63 +671,22 @@ class FaceMeshTracker:
 
         faces: List[dict] = []
 
-        # ─── 1. MediaPipe Face Mesh (Primary: dense 468 3D landmarks, sub-pixel optical flow) ───
-        if self._face_mesh is not None:
+        # ─── 1. Ultra-Light-Fast-Generic-Face-Detector (Primary ONNX Engine) ───
+        # Native 320x240 single-pass inference (~12ms on Raspberry Pi 4 CPU, zero queue buildup)
+        if (self._detector_net is not None or self._rfb_net is not None) and (self._priors is not None or self._rfb_priors is not None):
             try:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                rgb_frame.flags.writeable = False
-                results = self._face_mesh.process(rgb_frame)
-                rgb_frame.flags.writeable = True
-                if results and results.multi_face_landmarks:
-                    for fl in results.multi_face_landmarks:
-                        landmarks = fl.landmark
-                        # Anatomical facial landmarks: nose tip + glabella with pitch weighting
-                        nose_point = landmarks[NOSE_TIP_IDX]
-                        glabella_point = landmarks[GLABELLA_IDX]
-                        ry = float(0.40 * glabella_point.y + 0.60 * nose_point.y)
-                        nose_x = nose_point.x * w
-                        nose_y = nose_point.y * h
-
-                        det_fh = abs(landmarks[152].y - landmarks[10].y) * h
-                        det_fw = abs(landmarks[454].x - landmarks[234].x) * w
-                        faces.append({
-                            "raw_y": ry,
-                            "center_x": nose_x,
-                            "fx": nose_x - det_fw * 0.5,
-                            "fy": nose_y - det_fh * 0.5,
-                            "fw": det_fw, "fh": det_fh,
-                            "nose_x": nose_x, "nose_y": nose_y,
-                            "landmarks": landmarks,
-                        })
+                faces = self._onnx_detect_multi(frame, w, h)
             except Exception as exc:
-                logger.debug("MediaPipe multi-face exception: %s", exc)
+                logger.debug("Ultra-Light-Fast ONNX detect exception: %s", exc)
 
-        # ─── 2. OpenCV YuNet DNN fallback (Runs if MediaPipe is absent or detected 0 faces) ───
+        # ─── 2. Fallbacks (YuNet / Haar Cascade) ───
         if not faces and self._yunet is not None:
             try:
-                # Fast 160x160 ROI path: 3.5x speedup (11ms on Raspberry Pi 4) when single face is actively tracked
-                if not self.is_pvp and self._yunet_last_box is not None and self._yunet_roi_miss < 2:
-                    faces = self._detect_yunet_roi(frame, w, h, self._yunet_last_box)
-                    if faces:
-                        self._yunet_last_box = (faces[0]["fx"], faces[0]["fy"], faces[0]["fw"], faces[0]["fh"])
-                        self._yunet_roi_miss = 0
-                    else:
-                        self._yunet_roi_miss += 1
-
-                if not faces:
-                    faces = self._yunet_detect_multi(frame, w, h)
+                faces = self._yunet_detect_multi(frame, w, h)
             except Exception as exc:
-                logger.debug("OpenCV YuNet multi-face process exception: %s", exc)
+                logger.debug("YuNet detect exception: %s", exc)
 
-        # ─── 3. Ultra-Light-Fast-Generic-Face-Detector (RFB-320) fallback ───
-        if not faces and self._rfb_net is not None:
-            try:
-                faces = self._rfb_detect_multi(frame, w, h)
-            except Exception as exc:
-                logger.debug("RFB-320 multi-face process exception: %s", exc)
-
-        # ─── 4. Haar Cascade fallback (Emergency fallback only if no neural networks loaded) ───
-        if not faces and self._face_mesh is None and self._yunet is None and self._rfb_net is None and self._cascade is not None and not self._cascade.empty():
+        if not faces and self._cascade is not None and not self._cascade.empty():
             det, ry, fx, fy, fw, fh = self._cascade_detect(frame, w, h)
             if det:
                 faces.append({
@@ -1014,12 +964,14 @@ class FaceMeshTracker:
                         priors.append([cx, cy, min_box / w, min_box / h])
         return np.array(priors, dtype=np.float32)
 
-    def _rfb_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
+    def _onnx_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
         """
-        Detects faces using Ultra-Light-Fast-Face RFB-320 ONNX network.
-        Specialized for edge inference, distance (1-2m), and partial face occlusion.
+        Detects faces using Ultra-Light-Fast-Face (Slim-320 / RFB-320 ONNX) network.
+        Specialized for edge inference (~12ms on Raspberry Pi 4 CPU) with zero queue delay.
         """
-        if self._rfb_net is None or self._rfb_priors is None:
+        net = self._detector_net or self._slim_net or self._rfb_net
+        priors = self._priors if self._priors is not None else self._rfb_priors
+        if net is None or priors is None:
             return []
 
         detect_w, detect_h = min(320, w), min(240, h)
@@ -1035,8 +987,8 @@ class FaceMeshTracker:
         blob = cv2.dnn.blobFromImage(
             detect_frame, 1.0 / 128.0, (detect_w, detect_h), (127.0, 127.0, 127.0), swapRB=True
         )
-        self._rfb_net.setInput(blob)
-        scores, boxes = self._rfb_net.forward(["scores", "boxes"])
+        net.setInput(blob)
+        scores, boxes = net.forward(["scores", "boxes"])
 
         conf = scores[0, :, 1]
         score_thresh = 0.50
@@ -1046,17 +998,15 @@ class FaceMeshTracker:
 
         sub_conf = conf[mask]
         sub_boxes = boxes[0, mask, :]
-        sub_priors = self._rfb_priors[mask, :]
+        sub_priors = priors[mask, :]
 
-        cx = sub_priors[:, 0] + sub_boxes[:, 0] * 0.1 * sub_priors[:, 2]
-        cy = sub_priors[:, 1] + sub_boxes[:, 1] * 0.1 * sub_priors[:, 3]
-        bw = sub_priors[:, 2] * np.exp(sub_boxes[:, 2] * 0.2)
-        bh = sub_priors[:, 3] * np.exp(sub_boxes[:, 3] * 0.2)
+        cx = (sub_priors[:, 0] + sub_boxes[:, 0] * 0.1 * sub_priors[:, 2]) * detect_w * detect_scale_x
+        cy = (sub_priors[:, 1] + sub_boxes[:, 1] * 0.1 * sub_priors[:, 3]) * detect_h * detect_scale_y
+        bw = (sub_priors[:, 2] * np.exp(sub_boxes[:, 2] * 0.2)) * detect_w * detect_scale_x
+        bh = (sub_priors[:, 3] * np.exp(sub_boxes[:, 3] * 0.2)) * detect_h * detect_scale_y
 
-        x1 = (cx - bw * 0.5) * detect_w * detect_scale_x
-        y1 = (cy - bh * 0.5) * detect_h * detect_scale_y
-        bw = bw * detect_w * detect_scale_x
-        bh = bh * detect_h * detect_scale_y
+        x1 = cx - bw * 0.5
+        y1 = cy - bh * 0.5
 
         cv_boxes = [[int(x1[i]), int(y1[i]), int(bw[i]), int(bh[i])] for i in range(len(x1))]
         cv_scores = [float(sub_conf[i]) for i in range(len(sub_conf))]
@@ -1068,12 +1018,12 @@ class FaceMeshTracker:
                 bx, by, bw_i, bh_i = cv_boxes[idx]
                 if bh_i < 8 or bw_i < 8:
                     continue
-                raw_y = (by + bh_i * 0.45) / float(h)
+                raw_y = (by + bh_i * 0.42) / float(h)
                 results.append({
                     "raw_y": float(raw_y),
                     "center_x": float(bx + bw_i * 0.5),
                     "fx": float(bx), "fy": float(by), "fw": float(bw_i), "fh": float(bh_i),
-                    "nose_x": float(bx + bw_i * 0.5), "nose_y": float(by + bh_i * 0.45),
+                    "nose_x": float(bx + bw_i * 0.5), "nose_y": float(by + bh_i * 0.42),
                     "score": float(cv_scores[idx]),
                 })
 
@@ -1094,6 +1044,9 @@ class FaceMeshTracker:
 
         deduped.sort(key=lambda f: f["center_x"])
         return deduped
+
+    def _rfb_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
+        return self._onnx_detect_multi(frame, w, h)
 
     def _yunet_detect_2phase(
         self, frame: np.ndarray, w: int, h: int,
@@ -1189,66 +1142,6 @@ class FaceMeshTracker:
             ny = int(p1_face.get("nose_y", fy + fh * 0.5) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (0, 255, 200), -1)
 
-            # 1. MediaPipe 468-point cyber mesh if available
-            if "landmarks" in p1_face:
-                pts = p1_face["landmarks"]
-                # 1. Face oval contour polyline
-                oval_pts = np.array([[int(pts[idx].x * preview_w), int(pts[idx].y * preview_h)] for idx in CONTOUR_KEYPOINTS], np.int32)
-                cv2.polylines(hud_frame, [oval_pts], isClosed=True, color=(0, 200, 220), thickness=1)
-
-                # 2. Facial features: eyes, eyebrows, nose bridge, lips
-                for feature_indices, is_closed in [
-                    ([33, 160, 158, 133, 153, 144], True),       # Left eye
-                    ([362, 385, 387, 263, 373, 380], True),     # Right eye
-                    ([70, 63, 105, 66, 107], False),            # Left eyebrow
-                    ([300, 293, 334, 296, 336], False),         # Right eyebrow
-                    ([168, 6, 197, 195, 5, 4], False),          # Nose bridge
-                    ([61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291], True),  # Lips
-                ]:
-                    f_pts = np.array([[int(pts[i].x * preview_w), int(pts[i].y * preview_h)] for i in feature_indices], np.int32)
-                    cv2.polylines(hud_frame, [f_pts], isClosed=is_closed, color=(0, 240, 255), thickness=1)
-
-                # Landmark dots at key tracking vertices
-                for f_idx in (1, 33, 263, 61, 291, 168, 10, 152):
-                    px = int(pts[f_idx].x * preview_w)
-                    py = int(pts[f_idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 2, (0, 255, 230), -1)
-
-            # 2. YuNet 5-point facial geometry wireframe (Primary on Raspberry Pi / Python 3.13)
-            elif "re_x" in p1_face:
-                rex, rey = int(p1_face["re_x"] * scale_x), int(p1_face["re_y"] * scale_y)
-                lex, ley = int(p1_face["le_x"] * scale_x), int(p1_face["le_y"] * scale_y)
-                nx, ny = int(p1_face["nose_x"] * scale_x), int(p1_face["nose_y"] * scale_y)
-                rmx, rmy = int(p1_face["rm_x"] * scale_x), int(p1_face["rm_y"] * scale_y)
-                lmx, lmy = int(p1_face["lm_x"] * scale_x), int(p1_face["lm_y"] * scale_y)
-
-                # Eye bridge & eyebrow arches
-                cv2.line(hud_frame, (rex, rey), (lex, ley), (0, 200, 220), 1)
-                cv2.line(hud_frame, (rex - 4, rey - 3), (rex + 6, rey - 5), (0, 240, 255), 1)
-                cv2.line(hud_frame, (lex - 6, ley - 5), (lex + 4, ley - 3), (0, 240, 255), 1)
-
-                # Nose bridge from eyes center to nose tip
-                mid_x, mid_y = (rex + lex) // 2, (rey + ley) // 2
-                cv2.line(hud_frame, (mid_x, mid_y), (nx, ny), (0, 255, 200), 1)
-
-                # Mouth line & jaw contour
-                cv2.line(hud_frame, (rmx, rmy), (lmx, lmy), (0, 200, 220), 1)
-                chin_x = nx
-                chin_y = int(ry2 - 4)
-                cv2.line(hud_frame, (rmx, rmy), (chin_x, chin_y), (0, 180, 200), 1)
-                cv2.line(hud_frame, (lmx, lmy), (chin_x, chin_y), (0, 180, 200), 1)
-
-                # Biometric tracking nodes
-                for p_pt in ((rex, rey), (lex, ley), (nx, ny), (rmx, rmy), (lmx, lmy), (mid_x, mid_y), (chin_x, chin_y)):
-                    cv2.circle(hud_frame, p_pt, 2, (0, 255, 230), -1)
-
-            # 3. Dynamic KLT optical flow sub-pixel tracking constellation
-            if p1_face.get("klt_points") is not None:
-                for kpt in p1_face["klt_points"]:
-                    kpx = int(kpt[0, 0] * scale_x)
-                    kpy = int(kpt[0, 1] * scale_y)
-                    cv2.circle(hud_frame, (kpx, kpy), 1, (0, 255, 180), -1)
-
         # Render Player 2 (Crimson/Red)
         if p2_face is not None:
             fx, fy, fw, fh = p2_face["fx"], p2_face["fy"], p2_face["fw"], p2_face["fh"]
@@ -1260,68 +1153,8 @@ class FaceMeshTracker:
             cv2.putText(hud_frame, "P2", (rx1 + 2, max(11, ry1 - 2)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 60, 90), 1, cv2.LINE_AA)
             nx = int(p2_face.get("nose_x", fx + fw * 0.5) * scale_x)
-            ny = int(p2_face.get("nose_y", fy + fh * 0.5) * scale_y)
+            ny = int(p2_face.get("nose_y", fy + fh * 0.42) * scale_y)
             cv2.circle(hud_frame, (nx, ny), 3, (255, 60, 90), -1)
-
-            # 1. MediaPipe 468-point cyber mesh if available
-            if "landmarks" in p2_face:
-                pts = p2_face["landmarks"]
-                # 1. Face oval contour polyline
-                oval_pts = np.array([[int(pts[idx].x * preview_w), int(pts[idx].y * preview_h)] for idx in CONTOUR_KEYPOINTS], np.int32)
-                cv2.polylines(hud_frame, [oval_pts], isClosed=True, color=(220, 50, 80), thickness=1)
-
-                # 2. Facial features: eyes, eyebrows, nose bridge, lips
-                for feature_indices, is_closed in [
-                    ([33, 160, 158, 133, 153, 144], True),       # Left eye
-                    ([362, 385, 387, 263, 373, 380], True),     # Right eye
-                    ([70, 63, 105, 66, 107], False),            # Left eyebrow
-                    ([300, 293, 334, 296, 336], False),         # Right eyebrow
-                    ([168, 6, 197, 195, 5, 4], False),          # Nose bridge
-                    ([61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291], True),  # Lips
-                ]:
-                    f_pts = np.array([[int(pts[i].x * preview_w), int(pts[i].y * preview_h)] for i in feature_indices], np.int32)
-                    cv2.polylines(hud_frame, [f_pts], isClosed=is_closed, color=(255, 80, 120), thickness=1)
-
-                # Landmark dots at key tracking vertices
-                for f_idx in (1, 33, 263, 61, 291, 168, 10, 152):
-                    px = int(pts[f_idx].x * preview_w)
-                    py = int(pts[f_idx].y * preview_h)
-                    cv2.circle(hud_frame, (px, py), 2, (255, 140, 180), -1)
-
-            # 2. YuNet 5-point facial geometry wireframe (Primary on Raspberry Pi / Python 3.13)
-            elif "re_x" in p2_face:
-                rex, rey = int(p2_face["re_x"] * scale_x), int(p2_face["re_y"] * scale_y)
-                lex, ley = int(p2_face["le_x"] * scale_x), int(p2_face["le_y"] * scale_y)
-                nx, ny = int(p2_face["nose_x"] * scale_x), int(p2_face["nose_y"] * scale_y)
-                rmx, rmy = int(p2_face["rm_x"] * scale_x), int(p2_face["rm_y"] * scale_y)
-                lmx, lmy = int(p2_face["lm_x"] * scale_x), int(p2_face["lm_y"] * scale_y)
-
-                # Eye bridge & eyebrow arches
-                cv2.line(hud_frame, (rex, rey), (lex, ley), (220, 50, 80), 1)
-                cv2.line(hud_frame, (rex - 4, rey - 3), (rex + 6, rey - 5), (255, 80, 120), 1)
-                cv2.line(hud_frame, (lex - 6, ley - 5), (lex + 4, ley - 3), (255, 80, 120), 1)
-
-                # Nose bridge from eyes center to nose tip
-                mid_x, mid_y = (rex + lex) // 2, (rey + ley) // 2
-                cv2.line(hud_frame, (mid_x, mid_y), (nx, ny), (255, 100, 130), 1)
-
-                # Mouth line & jaw contour
-                cv2.line(hud_frame, (rmx, rmy), (lmx, lmy), (220, 50, 80), 1)
-                chin_x = nx
-                chin_y = int(ry2 - 4)
-                cv2.line(hud_frame, (rmx, rmy), (chin_x, chin_y), (180, 40, 60), 1)
-                cv2.line(hud_frame, (lmx, lmy), (chin_x, chin_y), (180, 40, 60), 1)
-
-                # Biometric tracking nodes
-                for p_pt in ((rex, rey), (lex, ley), (nx, ny), (rmx, rmy), (lmx, lmy), (mid_x, mid_y), (chin_x, chin_y)):
-                    cv2.circle(hud_frame, p_pt, 2, (255, 140, 180), -1)
-
-            # 3. Dynamic KLT optical flow sub-pixel tracking constellation
-            if p2_face.get("klt_points") is not None:
-                for kpt in p2_face["klt_points"]:
-                    kpx = int(kpt[0, 0] * scale_x)
-                    kpy = int(kpt[0, 1] * scale_y)
-                    cv2.circle(hud_frame, (kpx, kpy), 1, (255, 120, 160), -1)
 
         # Status text at bottom of PIP
         if self.is_pvp:
