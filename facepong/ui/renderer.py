@@ -394,13 +394,17 @@ class NeonRenderer:
             raw_rgb = tracking_state.preview_surface_buffer
             buf_id = id(raw_rgb)
             target_size = (pw - 4, ph - 22)
-            if self._cached_pip_id != buf_id or self._cached_pip_size != target_size:
-                cam_surface = pygame.image.frombuffer(raw_rgb.data, (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
-                self._cached_pip_surface = pygame.transform.scale(cam_surface, target_size)
-                self._cached_pip_id = buf_id
-                self._cached_pip_size = target_size
-            if self._cached_pip_surface is not None:
-                self.screen.blit(self._cached_pip_surface, (px + 2, py + 2))
+            if (self.config.camera.preview_width, self.config.camera.preview_height) == target_size:
+                cam_surface = pygame.image.frombuffer(raw_rgb.data, target_size, "RGB")
+                self.screen.blit(cam_surface, (px + 2, py + 2))
+            else:
+                if self._cached_pip_id != buf_id or self._cached_pip_size != target_size:
+                    cam_surface = pygame.image.frombuffer(raw_rgb.data, (self.config.camera.preview_width, self.config.camera.preview_height), "RGB")
+                    self._cached_pip_surface = pygame.transform.scale(cam_surface, target_size)
+                    self._cached_pip_id = buf_id
+                    self._cached_pip_size = target_size
+                if self._cached_pip_surface is not None:
+                    self.screen.blit(self._cached_pip_surface, (px + 2, py + 2))
         else:
             self._cached_pip_id = None
             placeholder = pygame.Surface((pw - 4, ph - 22))

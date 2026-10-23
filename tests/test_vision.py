@@ -381,6 +381,48 @@ class TestVisionTracker(unittest.TestCase):
         self.assertIsNotNone(tracker._rfb_priors)
         self.assertEqual(tracker._rfb_priors.shape, (4420, 4))
 
+    def test_velocity_derivative_direction_matches_paddle_motion(self):
+        """Verifies that moving up produces negative velocity (towards 0) and moving down produces positive velocity."""
+        tracker = FaceMeshTracker(self.config)
+        t = 100.0
+        # Initialize at baseline 0.50
+        tracker._update_player_state(0.50, 60.0, 240, t, player_idx=1)
+
+        # Move head UP (raw_y drops from 0.50 to 0.45)
+        t += 0.033
+        p_up = tracker._update_player_state(0.45, 60.0, 240, t, player_idx=1)
+        self.assertLess(p_up, 0.50)
+        self.assertLess(tracker._p1_velocity_y, 0.0)  # Velocity points UP (towards 0)
+
+        # Move head DOWN (raw_y rises from 0.45 to 0.55)
+        t += 0.033
+        p_down = tracker._update_player_state(0.55, 60.0, 240, t, player_idx=1)
+        self.assertGreater(p_down, p_up)
+        self.assertGreater(tracker._p1_velocity_y, 0.0)  # Velocity points DOWN (towards 1)
+
+    def test_yunet_roi_fast_path_detection(self):
+        """Verifies fast 160x160 ROI detection crop and coordinate remapping."""
+        tracker = FaceMeshTracker(self.config)
+
+        class MockRoiYuNet:
+            def setInputSize(self, size): pass
+            def detect(self, img):
+                # Returns face inside the 160x160 crop at center
+                # [x, y, w, h, rex, rey, lex, ley, nx, ny, rmx, rmy, lmx, lmy, score]
+                return True, np.array([[40, 40, 80, 80, 60, 65, 100, 65, 80, 85, 70, 105, 90, 105, 0.95]], dtype=np.float32)
+
+        tracker._yunet = MockRoiYuNet()
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        last_box = (100.0, 80.0, 80.0, 80.0)
+        roi_res = tracker._detect_yunet_roi(frame, 320, 240, last_box)
+
+        self.assertEqual(len(roi_res), 1)
+        face = roi_res[0]
+        self.assertIn("raw_y", face)
+        self.assertGreater(face["score"], 0.8)
+        self.assertGreater(face["fx"], 0)
+        self.assertGreater(face["fy"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
