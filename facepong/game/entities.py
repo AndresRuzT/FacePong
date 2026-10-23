@@ -101,7 +101,7 @@ class Paddle:
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.024,
+        smooth_time: float = 0.032,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:

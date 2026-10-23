@@ -307,12 +307,12 @@ class FaceMeshTracker:
                     model=yunet_path,
                     config="",
                     input_size=(320, 240),
-                    score_threshold=0.12,
+                    score_threshold=0.08,
                     nms_threshold=0.3,
                     top_k=8,
                 )
                 self._yunet_current_size = (320, 240)
-                logger.info("OpenCV YuNet DNN initialized at native 320x240 (score_thresh 0.12, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN initialized at native 320x240 (score_thresh 0.08, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.debug("YuNet initialization failed: %s", exc)
 
@@ -506,42 +506,32 @@ class FaceMeshTracker:
         else:
             mid_b = 0.5 * (min_b + max_b)
 
+            threshold_frames = 40 if self._is_calibrated else 8
+            # Continuous anti-stuck boundary relaxation: prevents paddle from ever locking against ceiling or floor
+            if clean_raw_y < min_b:
+                c_min += 1
+                if c_min > threshold_frames:
+                    mid_b += (clean_raw_y - min_b) * 0.15
+            else:
+                c_min = 0
+
+            if clean_raw_y > max_b:
+                c_max += 1
+                if c_max > threshold_frames:
+                    mid_b += (clean_raw_y - max_b) * 0.15
+            else:
+                c_max = 0
+
             if not self._is_calibrated:
-                # Anti-stuck boundary relaxation: prevents paddle from locking against ceiling or floor
-                if clean_raw_y < min_b:
-                    c_min += 1
-                    if c_min > 8:  # ~0.25s clamped at top
-                        mid_b += (clean_raw_y - min_b) * 0.15
-                else:
-                    c_min = 0
-
-                if clean_raw_y > max_b:
-                    c_max += 1
-                    if c_max > 8:  # ~0.25s clamped at bottom
-                        mid_b += (clean_raw_y - max_b) * 0.15
-                else:
-                    c_max = 0
-
-                # Spread adaptation for distance changes
+                # Dynamic spread adaptation for player distance changes (uncalibrated mode)
                 curr_spread = 0.5 * (max_b - min_b)
-                if abs(target_spread - curr_spread) > 0.008:
+                if abs(target_spread - curr_spread) > 0.005:
                     curr_spread = 0.95 * curr_spread + 0.05 * target_spread
                 min_b = max(0.02, mid_b - curr_spread)
                 max_b = min(0.98, mid_b + curr_spread)
                 mid_b = 0.5 * (min_b + max_b)
-            else:
-                # In calibrated mode: baseline bounds remain strictly anchored as calibrated
-                if clean_raw_y < min_b:
-                    c_min += 1
-                else:
-                    c_min = 0
 
-                if clean_raw_y > max_b:
-                    c_max += 1
-                else:
-                    c_max = 0
-
-        # Direct 1:1 responsive linear pitch mapping: instant, immediate reaction with zero deadband delay
+        # Direct 1:1 responsive pitch mapping: instant, immediate reaction with zero deadband delay
         # Looking up involves cervical extension (0.70x span allows effortless ceiling reach)
         # Looking down involves cervical flexion (0.85x span allows natural floor reach)
         if clean_raw_y <= mid_b:
@@ -693,8 +683,8 @@ class FaceMeshTracker:
                     "nose_x": fx + fw * 0.5, "nose_y": fy + fh * 0.5,
                 })
 
-        # Filter out tiny noise (faces < 14px)
-        faces = [f for f in faces if f.get("fh", 20) >= 14 and f.get("fw", 20) >= 14]
+        # Filter out tiny noise (faces < 10px in scan space)
+        faces = [f for f in faces if f.get("fh", 20) >= 10 and f.get("fw", 20) >= 10]
 
         # Prioritize the 2 largest faces in foreground to ignore background spectators/passersby
         if len(faces) > 2:
@@ -759,12 +749,12 @@ class FaceMeshTracker:
             if (now - self._p1_last_valid_detection_time) < 0.60 and not self._p1_is_first_sample:
                 effective_p1_detected = True
                 self.p1_detected = True
-                raw_y_p1 = self._p1_last_valid_raw_y
-                self.p1_raw_y = raw_y_p1
-                self.p1_smoothed_y = self._update_player_state(raw_y_p1, 60.0, h, now, player_idx=1)
+                # Decay velocity smoothly during brief single-frame misses without injecting 0-delta spikes into filter
+                self._p1_velocity_y *= 0.85
             else:
                 effective_p1_detected = False
                 self.p1_detected = False
+                self._p1_velocity_y = 0.0
 
         # Update Player 2 state
         if p2_face is not None:
@@ -775,11 +765,10 @@ class FaceMeshTracker:
         else:
             if (now - self._p2_last_valid_detection_time) < 0.60 and not self._p2_is_first_sample:
                 self.p2_detected = True
-                raw_y_p2 = self._p2_last_valid_raw_y
-                self.p2_raw_y = raw_y_p2
-                self.p2_smoothed_y = self._update_player_state(raw_y_p2, 60.0, h, now, player_idx=2)
+                self._p2_velocity_y *= 0.85
             else:
                 self.p2_detected = False
+                self._p2_velocity_y = 0.0
 
         if self._recenter_needed:
             self._recenter_needed = False
@@ -820,7 +809,7 @@ class FaceMeshTracker:
 
         face = faces[0]
         score = float(face[-1])
-        if score < 0.12:
+        if score < 0.08:
             return []
 
         scale_x = rw / float(roi_w)
@@ -880,7 +869,7 @@ class FaceMeshTracker:
         results = []
         for face in faces:
             score = float(face[-1])
-            if score < 0.12:
+            if score < 0.08:
                 continue
             fx = float(face[0] * detect_scale_x)
             fy = float(face[1] * detect_scale_y)
@@ -1328,12 +1317,17 @@ class VisionPipeline:
         if self._calibration_samples_p1:
             median_y_p1 = float(np.median(self._calibration_samples_p1))
             self.tracker.calibrate_baseline(median_y_p1, player_idx=1)
+        elif getattr(self.tracker, "_last_valid_raw_y", 0.5) > 0.05:
+            self.tracker.calibrate_baseline(self.tracker._last_valid_raw_y, player_idx=1)
+
         if self._calibration_samples_p2:
             median_y_p2 = float(np.median(self._calibration_samples_p2))
             self.tracker.calibrate_baseline(median_y_p2, player_idx=2)
         elif self._calibration_samples_p1:
             median_y_p1 = float(np.median(self._calibration_samples_p1))
             self.tracker.calibrate_baseline(median_y_p1, player_idx=2)
+        elif getattr(self.tracker, "_last_valid_raw_y", 0.5) > 0.05:
+            self.tracker.calibrate_baseline(self.tracker._last_valid_raw_y, player_idx=2)
 
         self._state.is_calibrated = True
         logger.info(
