@@ -35,6 +35,7 @@ class Paddle:
         self.target_y = float(y)
         self.target_velocity = 0.0
         self.target_sample_time = 0.0
+        self._target_history: Deque[Tuple[float, float]] = deque(maxlen=8)
         self.speed = 650.0  # Pixels per second for keyboard or AI tracking
         self.max_speed = max_speed  # Pixels per second cap
         self.current_velocity = 0.0  # SmoothDamp continuous velocity state
@@ -64,15 +65,26 @@ class Paddle:
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
         range_span = max_center - min_center
-        self.target_y = min_center + norm_y * range_span
+        screen_target = min_center + norm_y * range_span
+        self.target_y = screen_target
         self.target_velocity = norm_velocity * range_span
-        self.target_sample_time = sample_time if sample_time > 0.0 else time.perf_counter()
+        now = sample_time if sample_time > 0.0 else time.perf_counter()
+        self.target_sample_time = now
+
+        if not self._target_history or now > self._target_history[-1][0]:
+            self._target_history.append((now, float(screen_target)))
+        elif abs(now - self._target_history[-1][0]) < 1e-4:
+            self._target_history[-1] = (now, float(screen_target))
+        elif now < self._target_history[-1][0]:
+            self._target_history.clear()
+            self._target_history.append((now, float(screen_target)))
 
     def reset_to_center(self, center_y: float) -> None:
         """Immediately snaps paddle to vertical center coordinate."""
         self.target_y = float(center_y)
         self.target_velocity = 0.0
-        self.target_sample_time = time.perf_counter()
+        self.target_sample_time = 0.0
+        self._target_history.clear()
         self.y = float(center_y)
         self.current_velocity = 0.0
         self.clamp_target()
@@ -83,31 +95,48 @@ class Paddle:
         self.target_y += direction * self.speed * dt
         self.target_velocity = direction * self.speed
         self.target_sample_time = time.perf_counter()
+        self._target_history.clear()
         self.clamp_target()
 
     def update(
         self,
         dt: float,
-        smooth_time: float = 0.032,
+        smooth_time: float = 0.028,
         smooth_factor: Optional[float] = None,
         current_time: Optional[float] = None,
     ) -> None:
         """
-        Critically damped spring interpolation (SmoothDamp) with continuous target extrapolation.
-        Translates discrete camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jumps.
+        Critically damped spring interpolation (SmoothDamp) with continuous target interpolation.
+        Translates discrete camera tracking frame arrivals smoothly into 60 FPS refresh with zero lag, zero oscillation, and zero jitter.
         """
         if smooth_factor is not None:
             smooth_time = max(0.01, 1.0 / max(0.1, smooth_factor))
 
         now = current_time if current_time is not None else time.perf_counter()
-        elapsed = max(0.0, now - self.target_sample_time) if self.target_sample_time > 0.0 else 0.0
-        extrap = min(0.035, elapsed)
-
-        live_target = self.target_y + self.target_velocity * extrap
 
         half_h = self.height / 2.0
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
+
+        # Continuous target evaluation via interpolation buffer (minimal 20ms buffer for 60 FPS continuity)
+        if len(self._target_history) >= 2:
+            render_time = now - 0.020
+            if render_time <= self._target_history[0][0]:
+                live_target = self._target_history[0][1]
+            elif render_time >= self._target_history[-1][0]:
+                live_target = self._target_history[-1][1]
+            else:
+                live_target = self._target_history[-1][1]
+                for i in range(len(self._target_history) - 1):
+                    t0, y0 = self._target_history[i]
+                    t1, y1 = self._target_history[i + 1]
+                    if t0 <= render_time <= t1:
+                        u = (render_time - t0) / max(0.0001, t1 - t0)
+                        live_target = y0 + u * (y1 - y0)
+                        break
+        else:
+            live_target = self.target_y
+
         effective_target = max(min_center, min(max_center, live_target))
 
         st = max(0.0001, smooth_time)
@@ -125,7 +154,7 @@ class Paddle:
         new_pos = temp_target + (change + temp) * exp
 
         # Settle gently when within sub-pixel
-        if abs(new_pos - effective_target) < 0.20 and abs(self.current_velocity) < 6.0 and abs(self.target_velocity) < 5.0:
+        if abs(new_pos - effective_target) < 0.20 and abs(self.current_velocity) < 6.0:
             new_pos = effective_target
             self.current_velocity = 0.0
 

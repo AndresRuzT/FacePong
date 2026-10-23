@@ -179,6 +179,10 @@ class FaceMeshTracker:
         self._velocity_y: float = 0.0
         self._last_raw_y_sample_time: float = 0.0
 
+        # Micro-tremor deadband anchor state
+        self._p1_last_deadband_y: float = 0.5
+        self._p2_last_deadband_y: float = 0.5
+
         # Sub-Pixel Lucas-Kanade Optical Flow (KLT) tracking state
         self._p1_klt_pts: Optional[np.ndarray] = None
         self._p1_prev_gray: Optional[np.ndarray] = None
@@ -308,12 +312,12 @@ class FaceMeshTracker:
                 self._yunet = cv2.FaceDetectorYN.create(
                     model=yunet_path,
                     config="",
-                    input_size=(192, 144),
-                    score_threshold=0.20,
+                    input_size=(320, 240),
+                    score_threshold=0.25,
                     nms_threshold=0.3,
                     top_k=8,
                 )
-                logger.info("OpenCV YuNet DNN tracker initialized as fallback (192x144, 2 threads): %s", yunet_path)
+                logger.info("OpenCV YuNet DNN tracker initialized as fallback (320x240, 2 threads): %s", yunet_path)
         except Exception as exc:
             logger.warning("OpenCV YuNet initialization failed: %s", exc)
 
@@ -363,6 +367,8 @@ class FaceMeshTracker:
         self._p2_klt_y = None
         self._p1_filter.reset()
         self._p2_filter.reset()
+        self._p1_last_deadband_y = 0.5
+        self._p2_last_deadband_y = 0.5
         logger.info("FaceMeshTracker flagged for baseline re-anchor on new camera feed")
 
     def calibrate_baseline(self, neutral_y: float, range_spread: Optional[float] = None, player_idx: int = 1) -> None:
@@ -379,6 +385,7 @@ class FaceMeshTracker:
             self._is_first_sample = False
             self._p1_last_valid_raw_y = neutral_y
             self._last_valid_raw_y = neutral_y
+            self._p1_last_deadband_y = neutral_y
             self._p1_klt_y = neutral_y
             self._p1_filter.reset(0.5)
             logger.info(
@@ -390,6 +397,7 @@ class FaceMeshTracker:
             self._p2_max_y_bound = max_b
             self._p2_is_first_sample = False
             self._p2_last_valid_raw_y = neutral_y
+            self._p2_last_deadband_y = neutral_y
             self._p2_klt_y = neutral_y
             self._p2_filter.reset(0.5)
             logger.info(
@@ -442,8 +450,29 @@ class FaceMeshTracker:
             filt.reset(raw_y, now)
             clean_raw_y = raw_y
             raw_vel = 0.0
+            if player_idx == 1:
+                self._p1_last_deadband_y = raw_y
+            else:
+                self._p2_last_deadband_y = raw_y
         else:
             clean_raw_y, raw_vel = filt.filter(raw_y, now)
+
+        # Micro-tremor deadband: eliminates resting camera sensor jitter and sub-pixel noise
+        last_deadband = self._p1_last_deadband_y if player_idx == 1 else self._p2_last_deadband_y
+        deadband_thresh = 0.0040  # ~1.0px on a 240p image
+        if is_first:
+            if player_idx == 1:
+                self._p1_last_deadband_y = clean_raw_y
+            else:
+                self._p2_last_deadband_y = clean_raw_y
+        elif abs(clean_raw_y - last_deadband) < deadband_thresh:
+            clean_raw_y = last_deadband
+            raw_vel = 0.0
+        else:
+            if player_idx == 1:
+                self._p1_last_deadband_y = clean_raw_y
+            else:
+                self._p2_last_deadband_y = clean_raw_y
 
         # Re-anchor baseline if needed
         if recenter or is_first:
@@ -751,13 +780,18 @@ class FaceMeshTracker:
 
     def _yunet_detect_multi(self, frame: np.ndarray, w: int, h: int) -> List[dict]:
         """
-        Detects multiple faces using OpenCV YuNet DNN with ultra-fast 192x144 edge scan.
-        Takes only 10-12ms on Raspberry Pi 4 CPU, keeping the 60 FPS Pygame loop completely unblocked.
+        Detects multiple faces using OpenCV YuNet DNN with native resolution scan.
+        Ensures robust face and landmark detection at 1-2m distance.
         """
-        detect_w, detect_h = 192, 144
-        detect_frame = cv2.resize(frame, (detect_w, detect_h), interpolation=cv2.INTER_LINEAR)
-        detect_scale_x = w / float(detect_w)
-        detect_scale_y = h / float(detect_h)
+        detect_w, detect_h = min(320, w), min(240, h)
+        if w != detect_w or h != detect_h:
+            detect_frame = cv2.resize(frame, (detect_w, detect_h), interpolation=cv2.INTER_LINEAR)
+            detect_scale_x = w / float(detect_w)
+            detect_scale_y = h / float(detect_h)
+        else:
+            detect_frame = frame
+            detect_scale_x = 1.0
+            detect_scale_y = 1.0
 
         self._yunet.setInputSize((detect_w, detect_h))
         _, faces = self._yunet.detect(detect_frame)
