@@ -117,11 +117,12 @@ class Paddle:
         min_center = self.min_y + half_h + 4
         max_center = self.max_y - half_h - 4
 
-        # Real-time velocity extrapolation for the in-between render frame (bridges 30 FPS camera to 60 FPS render)
-        # Suppressed when stationary (< 15 px/s) to guarantee rock-solid resting paddle stability
-        if self.target_sample_time > 0.0 and abs(self.target_velocity) > 15.0:
-            extrap_dt = min(0.035, max(0.0, now - self.target_sample_time))
-            live_target = self.target_y + self.target_velocity * extrap_dt
+        # Real-time forward extrapolation for the in-between render frame (bridges 30 FPS camera to 60 FPS render)
+        # Continuous smooth blend at low velocities eliminates threshold stepping and jitter
+        if self.target_sample_time > 0.0:
+            extrap_dt = min(0.033, max(0.0, now - self.target_sample_time))
+            v_blend = min(1.0, abs(self.target_velocity) / 40.0)
+            live_target = self.target_y + (self.target_velocity * extrap_dt * v_blend)
         else:
             live_target = self.target_y
 
